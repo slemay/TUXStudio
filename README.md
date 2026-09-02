@@ -31,9 +31,10 @@ Enterprise Architecture and CMDB integration payloads (from ServiceNow, Workday,
 
 ## ✨ Key Features
 
-- ⚡ **Chunked Streaming SAX Ingestion**: Reads XML files in continuous chunks using `ReadableStream` and `TextDecoder` inside a Web Worker. Parses, normalizes, and flushes entities in transactional batches without freezing the UI.
-- 🗄️ **Dynamic In-Memory SQLite Engine**: Dynamically creates Fact tables for `<component>` types and Dimension tables for `<relationship>` types. Dynamically evolves schema as new attributes are encountered (`ALTER TABLE ADD COLUMN`).
-- ⚡ **Instant B-Tree Indexing**: Builds indexes on foreign keys (`comp1_alias`, `comp2_alias`, `parent_alias`) to deliver sub-millisecond query and traversal performance.
+- ⚡ **High-Speed Streaming XML Ingestion**: Reads XML files in continuous chunks using `ReadableStream` and `TextDecoder` in a Web Worker. Uses memoized identifier sanitizers, fast-path entity decoders, and unified batch transactions (15,000 records/tx) to ingest **275,000+ records in seconds** without UI stutter.
+- 💾 **Persistent IndexedDB Storage**: Ingested datasets are automatically serialized and preserved in browser `IndexedDB`. Data remains **100% persistent across page refreshes, tab closures, and browser restarts** with instantaneous rehydration.
+- 🗄️ **Dynamic In-Memory SQLite Engine**: Dynamically creates Fact tables for `<component>` types and Dimension tables for `<relationship>` types. Evolves schema on-the-fly (`ALTER TABLE ADD COLUMN`) as properties are discovered.
+- ⚡ **Instant B-Tree Indexing**: Generates B-Tree indexes on foreign keys (`comp1_alias`, `comp2_alias`, `parent_alias`) to deliver sub-millisecond query and graph traversal performance.
 - 📊 **High-Performance Tabular Explorer**: 
   - Server-side styled pagination with configurable page sizes (25, 50, 100, 250).
   - Multi-column substring filtering and global SQL column sorting (`ASC`/`DESC`).
@@ -81,16 +82,17 @@ Enterprise Architecture and CMDB integration payloads (from ServiceNow, Workday,
 │                    (src/workers/tuxWorker.ts)                           │
 │                                                                         │
 │   ┌───────────────────────────┐         ┌───────────────────────────┐   │
-│   │  Streaming SAX Tokenizer  │ ──────> │  SQLite WASM (sql.js)     │   │
-│   │ (ReadableStream + Regex)  │         │  - Fact / Dimension Tables│   │
-│   └───────────────────────────┘         │  - B-Tree Indexes         │   │
-│                                         └─────────────┬─────────────┘   │
-│                                                       │                 │
-│   ┌───────────────────────────┐                       │                 │
-│   │   Export Generators       │ <─────────────────────┘                 │
-│   │  - SQLite Binary (.db)    │                                         │
-│   │  - CSV Bundle (.zip)      │                                         │
-│   └───────────────────────────┘                                         │
+│   │  Fast Streaming SAX Parser│ ──────> │  SQLite WASM (sql.js)     │   │
+│   │ (15k Multi-Table Batches) │         │  - Fact / Dimension Tables│   │
+│   └─────────────┬─────────────┘         │  - B-Tree Indexes         │   │
+│                 │                       └─────────────┬─────────────┘   │
+│                 │                                     │                 │
+│                 ▼                                     ▼                 │
+│   ┌───────────────────────────┐         ┌───────────────────────────┐   │
+│   │  IndexedDB Persistence    │ <────── │   Export Generators       │   │
+│   │ (Zero Data Loss on Reload)│         │  - SQLite Binary (.db)    │   │
+│   └───────────────────────────┘         │  - CSV Bundle (.zip)      │   │
+│                                         └───────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 

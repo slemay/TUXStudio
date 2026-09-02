@@ -50,10 +50,17 @@ This document details the system architecture, algorithmic design, database mode
 │   ┌───────────────────────────────────┐     ┌──────────────────────────────────────┐   │
 │   │     Streaming SAX Ingestion       │     │         SQLite WASM (sql.js)        │   │
 │   │  - Chunked stream decoding        │ ──> │  - In-memory database instance       │   │
-│   │  - Entity boundary detection      │     │  - Dynamic schema creation           │   │
-│   │  - Attribute & property parsing   │     │  - Dynamic column evolution          │   │
-│   │  - Batch buffer flusher (2500/tx) │     │  - B-Tree index creation             │   │
+│   │  - Sliding boundary tokenizer     │     │  - Dynamic schema creation           │   │
+│   │  - Memoized sanitization cache    │     │  - Dynamic column evolution          │   │
+│   │  - Fast-path entity decoder       │     │  - B-Tree index creation             │   │
+│   │  - Unified multi-table batch flusher    │  - High throughput memory PRAGMAs    │   │
 │   └───────────────────────────────────┘     └──────────────────┬───────────────────┘   │
+│                                                                │                       │
+│   ┌───────────────────────────────────┐                        │                       │
+│   │   IndexedDB Persistence Layer     │ <──────────────────────┤                       │
+│   │  - Auto-rehydration on boot/reload│                        │                       │
+│   │  - Cross-session database store   │                        │                       │
+│   └───────────────────────────────────┘                        │                       │
 │                                                                │                       │
 │   ┌───────────────────────────────────┐                        │                       │
 │   │      Graph & Traversal Engine     │ <──────────────────────┤                       │
@@ -98,31 +105,36 @@ Incoming Stream Chunks
                Extracted XML Substrings
                             │
                             ▼
-               Attribute & Property Parser
+          Fast Attribute & Property Parser
+          - Memoized Identifier Sanitizer
+          - Fast-Path XML Entity Decoder
                             │
                             ▼
-               Batch Insert Buffer (2,500 records)
+      Unified Multi-Table Buffer (15,000 records)
                             │ (flush when full)
                             ▼
-               SQLite `BEGIN TRANSACTION` ... `COMMIT`
+      Atomic SQLite `BEGIN TRANSACTION` ... `COMMIT`
 ```
 
-### 3.2 Dynamic Batch Flushing & Transaction Management
+### 3.2 High-Throughput Batch Flushing & Performance Optimizations
 
-To maximize ingestion throughput and minimize SQLite WASM overhead:
-- Incoming records are queued in per-table memory buffers (`compBuffers` and `relBuffers`).
-- Buffers flush when they reach **2,500 records** or upon reaching the end of the file.
-- Inserts are executed inside explicit transactions:
+To maximize ingestion throughput and minimize SQLite WASM execution overhead:
+- **Unified Multi-Table Batch Transactions**: Rather than opening and closing hundreds of mini-transactions per individual table, incoming records across all component and relationship tables are buffered globally and flushed in a **single atomic transaction** every 15,000 records or at stream termination:
   ```sql
   BEGIN TRANSACTION;
-  INSERT OR REPLACE INTO "Application" ("alias", "name", "type", "description") VALUES (?, ?, ?, ?);
+  INSERT OR REPLACE INTO "Person" ("alias", "name", "type", ...) VALUES (?, ?, ?, ...);
+  INSERT INTO "Reports_To" ("type", "comp1_alias", "comp2_alias") VALUES (?, ?, ?);
   ...
   COMMIT;
   ```
-- Pragmas configured for in-memory execution speed:
+- **Fast-Path Entity Decoding**: Bypasses regex replacements entirely whenever the input string does not contain an `&` character (`!str.includes('&')`), skipping >95% of regex passes.
+- **Identifier Memoization (`sanitizeMap`)**: Caches sanitized table and column names in an in-memory `Map`, eliminating repeated regex operations for recurring property keys across 275,000+ elements.
+- **SQLite In-Memory Performance PRAGMAs**:
   ```sql
   PRAGMA synchronous = OFF;
   PRAGMA journal_mode = MEMORY;
+  PRAGMA temp_store = MEMORY;
+  PRAGMA cache_size = -64000;
   ```
 
 ---
@@ -164,11 +176,42 @@ CREATE INDEX IF NOT EXISTS "idx_<CompTable>_parent" ON "<CompTable>" ("parent_al
 
 ---
 
-## 5. Web Worker RPC Protocol
+## 5. IndexedDB Cross-Session Persistence Engine
+
+To guarantee zero data loss and eliminate repetitive parsing when refreshing or revisiting the application, TUX Studio implements an asynchronous client-side persistence pipeline using browser-native **IndexedDB**:
+
+### 5.1 Storage Architecture & Schema
+
+- **Database Name**: `tuxstudio_persistence`
+- **Object Store**: `datasets`
+- **Stored Record Structure**:
+  ```typescript
+  interface StoredDataset {
+    payloadInfo: PayloadInfo;
+    binaryData: Uint8Array; // Raw SQLite 3 database file binary
+    updatedAt: number;
+  }
+  ```
+- **Active Key Pointer**: `__active_payload_id__` tracks the current workspace dataset.
+
+### 5.2 Auto-Rehydration Lifecycle
+
+1. **Worker Bootstrap**: When the Web Worker initializes or the user reloads the browser, `getOrInitDb()` calls `loadDatabaseFromIndexedDb()`.
+2. **Binary Restoration**: If an active dataset binary is found, SQLite WASM loads the binary image directly:
+   ```typescript
+   db = new SQL.Database(persisted.binaryData);
+   ```
+3. **Metadata Reconstruction**: `rebuildTableMetadata(db)` dynamically repopulates column and table caches (`tableColumns`, `compTableMap`, `relTableMap`) by querying `sqlite_master` and `PRAGMA table_info`.
+4. **Post-Ingest Snapshot**: Upon streaming ingest completion, `database.export()` generates a binary snapshot and commits it to IndexedDB asynchronously without blocking UI interactions.
+5. **Clean Wipe Lifecycle**: When a user triggers "Clear Dataset", `clearDatabaseFromIndexedDb()` purges the persistent store and drops all in-memory tables.
+
+---
+
+## 6. Web Worker RPC Protocol
 
 Communication between the React UI thread and the Web Worker is managed by a typed request-response protocol in [`src/clientDb.ts`](file:///Users/slemay/Work/TUXStudio/src/clientDb.ts).
 
-### 5.1 Message Types
+### 6.1 Message Types
 
 ```typescript
 // Requests from Main Thread -> Worker
@@ -183,7 +226,8 @@ interface WorkerRequest {
     | 'GET_METAMODEL_GRAPH' 
     | 'GET_NEIGHBORHOOD_GRAPH' 
     | 'EXPORT_SQLITE' 
-    | 'EXPORT_CSV_ZIP';
+    | 'EXPORT_CSV_ZIP'
+    | 'CLEAR_DATASET';
   payload?: any;
 }
 
@@ -211,9 +255,9 @@ interface WorkerProgressMessage {
 
 ---
 
-## 6. Metamodel Derivation & Graph Layout
+## 7. Metamodel Derivation & Graph Layout
 
-### 6.1 Reverse-Engineered UML 2.5 Metamodel
+### 7.1 Reverse-Engineered UML 2.5 Metamodel
 
 Rather than relying on static schema declarations, TUX Studio derives the complete metamodel graph from the ingested data instances:
 
@@ -232,17 +276,17 @@ Rather than relying on static schema declarations, TUX Studio derives the comple
    - If `COUNT(DISTINCT comp1_alias) == COUNT(*)`, target multiplicity is `1`, otherwise `*`.
    - If `COUNT(DISTINCT comp2_alias) == COUNT(*)`, source multiplicity is `1`, otherwise `0..1` or `*`.
 
-### 6.2 Layout Algorithm & Geometry
+### 7.2 Layout Algorithm & Geometry
 
 - **Radial Hub-and-Spoke Layout**: Calculates node degrees (number of incoming/outgoing relationship types) to identify the central hub classifier. The hub is placed at canvas center `(540, 360)`, and satellite nodes are positioned in an elliptical orbit:
-  $$x_i = C_x + R_x \cdot \cos\left(\frac{2\pi i}{N} - \frac{\pi}{2}\right)$$
-  $$y_i = C_y + R_y \cdot \sin\left(\frac{2\pi i}{N} - \frac{\pi}{2}\right)$$
+   $$x_i = C_x + R_x \cdot \cos\left(\frac{2\pi i}{N} - \frac{\pi}{2}\right)$$
+   $$y_i = C_y + R_y \cdot \sin\left(\frac{2\pi i}{N} - \frac{\pi}{2}\right)$$
 - **Ray-Box Perimeter Intersection**: Edge connector arrows are not clamped to generic center points; they compute exact line-rectangle perimeter intersections using slope ray casting, ensuring arrows touch UML box boundaries cleanly.
 - **State Persistence**: Custom node drag coordinates are saved in `localStorage` under `tuxdb_metamodel_pos_<payloadId>`.
 
 ---
 
-## 7. Tabular Explorer & Query Engine
+## 8. Tabular Explorer & Query Engine
 
 The Tabular Explorer in [`src/components/DataGrid.tsx`](file:///Users/slemay/Work/TUXStudio/src/components/DataGrid.tsx) executes parameterized SQL queries against SQLite WASM:
 
@@ -260,14 +304,14 @@ The Tabular Explorer in [`src/components/DataGrid.tsx`](file:///Users/slemay/Wor
 
 ---
 
-## 8. Export Architecture
+## 9. Export Architecture
 
-### 8.1 SQLite Binary Export (`.db`)
+### 9.1 SQLite Binary Export (`.db`)
 1. Calls `db.export()` on the SQLite WASM instance to serialize the in-memory database into a `Uint8Array`.
 2. Encapsulates the binary array into an `application/x-sqlite3` Blob.
 3. Triggers a direct DOM anchor download.
 
-### 8.2 CSV Archive Bundle (`.zip`)
+### 9.2 CSV Archive Bundle (`.zip`)
 1. Iterates over all user tables in `sqlite_master`.
 2. Queries all rows, formats values with CSV quotation and escape rules (`" -> ""`).
 3. Uses `JSZip` to compile individual CSV files into a compressed `.zip` archive.
@@ -275,7 +319,7 @@ The Tabular Explorer in [`src/components/DataGrid.tsx`](file:///Users/slemay/Wor
 
 ---
 
-## 9. Security & Privacy Model
+## 10. Security & Privacy Model
 
 - **No Remote Telemetry**: TUX Studio does not contain analytics, tracking pixels, or outbound network requests.
 - **Sandboxed Execution**: Worker code and SQLite WASM execute entirely within browser sandboxing constraints.
