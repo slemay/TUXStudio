@@ -1,4 +1,5 @@
 import initSqlJs, { type Database, type Statement } from 'sql.js';
+import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import JSZip from 'jszip';
 
 // =====================================================================
@@ -74,9 +75,8 @@ function parseXmlAttributes(attrStr: string): Record<string, string> {
 
 async function getOrInitDb(): Promise<Database> {
   if (db) return db;
-  const wasmUrl = new URL(/* @vite-ignore */ '../sql-wasm.wasm', import.meta.url).href;
   const SQL = await initSqlJs({
-    locateFile: () => wasmUrl,
+    locateFile: () => sqlWasmUrl,
   });
   db = new SQL.Database();
   db.exec('PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;');
@@ -93,448 +93,478 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
   compTableMap.clear();
   relTableMap.clear();
 
-  const database = await getOrInitDb();
-  // Clear any existing tables
   try {
-    const existing = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
-    if (existing.length > 0 && existing[0].values) {
-      for (const row of existing[0].values) {
-        database.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
-      }
-    }
-  } catch (e) {
-    console.error('Error clearing database:', e);
-  }
-
-  const totalBytes = file.size || 1;
-  let bytesProcessed = 0;
-  let compCount = 0;
-  let relCount = 0;
-
-  const compBuffers = new Map<string, Array<Record<string, string>>>();
-  const relBuffers = new Map<string, Array<Record<string, string>>>();
-  const seenAliases = new Set<string>();
-
-  const ensureCompTable = (tableName: string, rowCols: string[]) => {
-    if (!tableColumns.has(tableName)) {
-      database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" ("alias" TEXT PRIMARY KEY, "name" TEXT, "type" TEXT);`);
-      tableColumns.set(tableName, new Set(['alias', 'name', 'type']));
-    }
-    const colsSet = tableColumns.get(tableName)!;
-    for (const c of rowCols) {
-      if (!colsSet.has(c)) {
-        try {
-          database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
-          colsSet.add(c);
-        } catch (_) {}
-      }
-    }
-  };
-
-  const ensureRelTable = (tableName: string, rowCols: string[]) => {
-    if (!tableColumns.has(tableName)) {
-      database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "type" TEXT, "comp1_alias" TEXT, "comp2_alias" TEXT);`);
-      tableColumns.set(tableName, new Set(['id', 'type', 'comp1_alias', 'comp2_alias']));
-    }
-    const colsSet = tableColumns.get(tableName)!;
-    for (const c of rowCols) {
-      if (!colsSet.has(c)) {
-        try {
-          database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
-          colsSet.add(c);
-        } catch (_) {}
-      }
-    }
-  };
-
-  const flushCompBuffer = (tableName: string) => {
-    const buffer = compBuffers.get(tableName);
-    if (!buffer || buffer.length === 0) return;
-
-    const colsSet = tableColumns.get(tableName)!;
-    const cols = Array.from(colsSet);
-    const placeholders = cols.map(() => '?').join(', ');
-    const colSql = cols.map((c) => `"${c}"`).join(', ');
-    const sql = `INSERT OR REPLACE INTO "${tableName}" (${colSql}) VALUES (${placeholders})`;
-
-    database.exec('BEGIN TRANSACTION;');
-    let stmt: Statement | null = null;
+    const database = await getOrInitDb();
+    // Clear any existing tables
     try {
-      stmt = database.prepare(sql);
-      for (const row of buffer) {
-        const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
-        stmt.run(values);
+      const existing = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
+      if (existing.length > 0 && existing[0].values) {
+        for (const row of existing[0].values) {
+          database.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
+        }
       }
-    } finally {
-      if (stmt) stmt.free();
-      database.exec('COMMIT;');
+    } catch (e) {
+      console.error('Error clearing database:', e);
     }
-    buffer.length = 0;
-  };
 
-  const flushRelBuffer = (tableName: string) => {
-    const buffer = relBuffers.get(tableName);
-    if (!buffer || buffer.length === 0) return;
+    const totalBytes = file.size || 1;
+    let bytesProcessed = 0;
+    let compCount = 0;
+    let relCount = 0;
 
-    const colsSet = tableColumns.get(tableName)!;
-    // Exclude 'id' which is auto-increment
-    const cols = Array.from(colsSet).filter((c) => c !== 'id');
-    const placeholders = cols.map(() => '?').join(', ');
-    const colSql = cols.map((c) => `"${c}"`).join(', ');
-    const sql = `INSERT INTO "${tableName}" (${colSql}) VALUES (${placeholders})`;
+    const compBuffers = new Map<string, Array<Record<string, string>>>();
+    const relBuffers = new Map<string, Array<Record<string, string>>>();
+    const seenAliases = new Set<string>();
 
-    database.exec('BEGIN TRANSACTION;');
-    let stmt: Statement | null = null;
-    try {
-      stmt = database.prepare(sql);
-      for (const row of buffer) {
-        const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
-        stmt.run(values);
+    const ensureCompTable = (tableName: string, rowCols: string[]) => {
+      if (!tableColumns.has(tableName)) {
+        database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" ("alias" TEXT PRIMARY KEY, "name" TEXT, "type" TEXT);`);
+        tableColumns.set(tableName, new Set(['alias', 'name', 'type']));
       }
-    } finally {
-      if (stmt) stmt.free();
-      database.exec('COMMIT;');
-    }
-    buffer.length = 0;
-  };
+      const colsSet = tableColumns.get(tableName)!;
+      for (const c of rowCols) {
+        if (!colsSet.has(c)) {
+          try {
+            database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
+            colsSet.add(c);
+          } catch {
+            // column might already exist
+          }
+        }
+      }
+    };
 
-  self.postMessage({
-    type: 'PROGRESS',
-    stage: 'ingest',
-    percent: 2,
-    message: 'Initializing streaming XML parser in WebAssembly worker...',
-    components_ingested: 0,
-    relationships_ingested: 0,
-    bytes_processed: 0,
-    total_bytes: totalBytes,
-  } as WorkerProgressMessage);
+    const ensureRelTable = (tableName: string, rowCols: string[]) => {
+      if (!tableColumns.has(tableName)) {
+        database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "type" TEXT, "comp1_alias" TEXT, "comp2_alias" TEXT);`);
+        tableColumns.set(tableName, new Set(['id', 'type', 'comp1_alias', 'comp2_alias']));
+      }
+      const colsSet = tableColumns.get(tableName)!;
+      for (const c of rowCols) {
+        if (!colsSet.has(c)) {
+          try {
+            database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
+            colsSet.add(c);
+          } catch {
+            // column might already exist
+          }
+        }
+      }
+    };
 
-  // Stream XML using ReadableStream
-  const stream = file.stream();
-  const reader = stream.getReader();
-  const decoder = new TextDecoder('utf-8');
+    const flushCompBuffer = (tableName: string) => {
+      const buffer = compBuffers.get(tableName);
+      if (!buffer || buffer.length === 0) return;
 
-  let buffer = '';
-  let lastReport = performance.now();
+      const colsSet = tableColumns.get(tableName)!;
+      const cols = Array.from(colsSet);
+      const placeholders = cols.map(() => '?').join(', ');
+      const colSql = cols.map((c) => `"${c}"`).join(', ');
+      const sql = `INSERT OR REPLACE INTO "${tableName}" (${colSql}) VALUES (${placeholders})`;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+      database.exec('BEGIN TRANSACTION;');
+      let stmt: Statement | null = null;
+      try {
+        stmt = database.prepare(sql);
+        for (const row of buffer) {
+          const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
+          stmt.run(values);
+        }
+      } finally {
+        if (stmt) stmt.free();
+        database.exec('COMMIT;');
+      }
+      buffer.length = 0;
+    };
 
-    bytesProcessed += value.byteLength;
-    buffer += decoder.decode(value, { stream: true });
+    const flushRelBuffer = (tableName: string) => {
+      const buffer = relBuffers.get(tableName);
+      if (!buffer || buffer.length === 0) return;
 
-    // Process complete XML elements in the buffer
-    let pos = 0;
-    while (pos < buffer.length) {
-      // Look for <component or <relationship
-      const nextComp = buffer.indexOf('<component', pos);
-      const nextRel = buffer.indexOf('<relationship', pos);
+      const colsSet = tableColumns.get(tableName)!;
+      // Exclude 'id' which is auto-increment
+      const cols = Array.from(colsSet).filter((c) => c !== 'id');
+      const placeholders = cols.map(() => '?').join(', ');
+      const colSql = cols.map((c) => `"${c}"`).join(', ');
+      const sql = `INSERT INTO "${tableName}" (${colSql}) VALUES (${placeholders})`;
 
-      let targetPos = -1;
-      let isComp = false;
+      database.exec('BEGIN TRANSACTION;');
+      let stmt: Statement | null = null;
+      try {
+        stmt = database.prepare(sql);
+        for (const row of buffer) {
+          const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
+          stmt.run(values);
+        }
+      } finally {
+        if (stmt) stmt.free();
+        database.exec('COMMIT;');
+      }
+      buffer.length = 0;
+    };
 
-      if (nextComp !== -1 && nextRel !== -1) {
-        if (nextComp < nextRel) {
+    self.postMessage({
+      type: 'PROGRESS',
+      stage: 'ingest',
+      percent: 5,
+      message: 'Initializing streaming XML parser in WebAssembly worker...',
+      components_ingested: 0,
+      relationships_ingested: 0,
+      bytes_processed: 0,
+      total_bytes: totalBytes,
+    } as WorkerProgressMessage);
+
+    // Stream XML using ReadableStream
+    const stream = file.stream();
+    const reader = stream.getReader();
+    const decoder = new TextDecoder('utf-8');
+
+    let buffer = '';
+    let lastReport = performance.now();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      bytesProcessed += value.byteLength;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete XML elements in the buffer
+      let pos = 0;
+      let lastUnparsedPos = 0;
+
+      while (pos < buffer.length) {
+        // Look for <component or <relationship
+        const nextComp = buffer.indexOf('<component', pos);
+        const nextRel = buffer.indexOf('<relationship', pos);
+
+        let targetPos = -1;
+        let isComp = false;
+
+        if (nextComp !== -1 && nextRel !== -1) {
+          if (nextComp < nextRel) {
+            targetPos = nextComp;
+            isComp = true;
+          } else {
+            targetPos = nextRel;
+            isComp = false;
+          }
+        } else if (nextComp !== -1) {
           targetPos = nextComp;
           isComp = true;
-        } else {
+        } else if (nextRel !== -1) {
           targetPos = nextRel;
           isComp = false;
+        } else {
+          lastUnparsedPos = pos;
+          break; // No more elements in this buffer chunk
         }
-      } else if (nextComp !== -1) {
-        targetPos = nextComp;
-        isComp = true;
-      } else if (nextRel !== -1) {
-        targetPos = nextRel;
-        isComp = false;
-      } else {
-        break; // No more elements in this buffer chunk
-      }
 
-      const closeTag = isComp ? '</component>' : '</relationship>';
-      const endTagPos = buffer.indexOf(closeTag, targetPos);
-      const selfClosePos = buffer.indexOf('/>', targetPos);
+        const openTagEnd = buffer.indexOf('>', targetPos);
+        if (openTagEnd === -1) {
+          // Opening tag incomplete, wait for more stream chunks
+          lastUnparsedPos = targetPos;
+          break;
+        }
 
-      let elemEnd = -1;
-      let isSelfClosing = false;
+        const openTagStr = buffer.substring(targetPos, openTagEnd + 1);
+        const isSelfClosing = openTagStr.trimEnd().endsWith('/>');
 
-      if (endTagPos !== -1 && (selfClosePos === -1 || endTagPos < selfClosePos)) {
-        elemEnd = endTagPos + closeTag.length;
-      } else if (selfClosePos !== -1 && (endTagPos === -1 || selfClosePos < endTagPos)) {
-        const gt = buffer.indexOf('>', targetPos);
-        if (selfClosePos + 1 === gt) {
-          elemEnd = selfClosePos + 2;
-          isSelfClosing = true;
-        } else if (endTagPos !== -1) {
+        let elemEnd = -1;
+        if (isSelfClosing) {
+          elemEnd = openTagEnd + 1;
+        } else {
+          const closeTag = isComp ? '</component>' : '</relationship>';
+          const endTagPos = buffer.indexOf(closeTag, openTagEnd);
+          if (endTagPos === -1) {
+            // Closing tag not yet received in this chunk
+            lastUnparsedPos = targetPos;
+            break;
+          }
           elemEnd = endTagPos + closeTag.length;
         }
-      }
 
-      if (elemEnd === -1) {
-        break;
-      }
+        const elemXml = buffer.substring(targetPos, elemEnd);
+        pos = elemEnd;
+        lastUnparsedPos = pos;
 
-      const elemXml = buffer.substring(targetPos, elemEnd);
-      pos = elemEnd;
+        if (isComp) {
+          compCount++;
+          const openTag = elemXml.substring(0, elemXml.indexOf('>'));
+          const attrs = parseXmlAttributes(openTag);
+          const ctype = attrs['type'] || 'Component';
+          const tableName = sanitizeIdentifier(ctype);
+          compTableMap.set(ctype, tableName);
 
-      if (isComp) {
-        compCount++;
-        const openTagEnd = elemXml.indexOf('>');
-        const openTag = elemXml.substring(0, openTagEnd);
-        const attrs = parseXmlAttributes(openTag);
-        const ctype = attrs['type'] || 'Component';
-        const tableName = sanitizeIdentifier(ctype);
-        compTableMap.set(ctype, tableName);
-
-        let alias = attrs['alias'] || '';
-        const name = attrs['name'] || '';
-        if (!alias) {
-          alias = name ? `${ctype}:${name}` : `${ctype}:Auto_${compCount}`;
-          if (seenAliases.has(alias)) {
-            alias = `${alias}:${compCount}`;
+          let alias = attrs['alias'] || '';
+          const name = attrs['name'] || '';
+          if (!alias) {
+            alias = name ? `${ctype}:${name}` : `${ctype}:Auto_${compCount}`;
+            if (seenAliases.has(alias)) {
+              alias = `${alias}:${compCount}`;
+            }
           }
-        }
-        seenAliases.add(alias);
+          seenAliases.add(alias);
 
-        const row: Record<string, string> = {
-          alias,
-          name,
-          type: ctype,
-        };
+          const row: Record<string, string> = {
+            alias,
+            name,
+            type: ctype,
+          };
 
-        for (const [k, v] of Object.entries(attrs)) {
-          if (k !== 'alias' && k !== 'name' && k !== 'type') {
-            row[sanitizeIdentifier(k)] = v;
-          }
-        }
-
-        if (!isSelfClosing) {
-          const body = elemXml.substring(openTagEnd + 1, elemXml.length - closeTag.length);
-
-          const parentMatch = /<parentalias\s+([^>]*)\/?>/i.exec(body);
-          if (parentMatch) {
-            const pAttrs = parseXmlAttributes(parentMatch[1]);
-            if (pAttrs['alias']) row['parent_alias'] = pAttrs['alias'];
+          for (const [k, v] of Object.entries(attrs)) {
+            if (k !== 'alias' && k !== 'name' && k !== 'type') {
+              row[sanitizeIdentifier(k)] = v;
+            }
           }
 
-          const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(body);
-          if (descMatch) {
-            row['description'] = decodeXmlEntities(descMatch[1].trim());
-          }
+          if (!isSelfClosing) {
+            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 12); // length of </component> is 12
 
-          const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
-          if (locMatch) {
-            const lAttrs = parseXmlAttributes(locMatch[1]);
-            if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
-          }
+            const parentMatch = /<parentalias\s+([^>]*)\/?>/i.exec(body);
+            if (parentMatch) {
+              const pAttrs = parseXmlAttributes(parentMatch[1]);
+              if (pAttrs['alias']) row['parent_alias'] = pAttrs['alias'];
+            }
 
-          const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
-          let propMatch;
-          while ((propMatch = propRegex.exec(body)) !== null) {
-            const pAttrStr = propMatch[1] || propMatch[3] || '';
-            const pAttrs = parseXmlAttributes(pAttrStr);
-            const pname = pAttrs['name'];
-            let pval = pAttrs['value'] || '';
-            if (!pval && propMatch[2]) {
-              const inner = propMatch[2].trim();
-              if (inner.includes('<listItem')) {
-                const items: string[] = [];
-                const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
-                let itemMatch;
-                while ((itemMatch = itemRegex.exec(inner)) !== null) {
-                  items.push(decodeXmlEntities(itemMatch[1].trim()));
+            const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(body);
+            if (descMatch) {
+              row['description'] = decodeXmlEntities(descMatch[1].trim());
+            }
+
+            const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
+            if (locMatch) {
+              const lAttrs = parseXmlAttributes(locMatch[1]);
+              if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
+            }
+
+            const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+            let propMatch;
+            while ((propMatch = propRegex.exec(body)) !== null) {
+              const pAttrStr = propMatch[1] || propMatch[3] || '';
+              const pAttrs = parseXmlAttributes(pAttrStr);
+              const pname = pAttrs['name'];
+              let pval = pAttrs['value'] || '';
+              if (!pval && propMatch[2]) {
+                const inner = propMatch[2].trim();
+                if (inner.includes('<listItem')) {
+                  const items: string[] = [];
+                  const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+                  let itemMatch;
+                  while ((itemMatch = itemRegex.exec(inner)) !== null) {
+                    items.push(decodeXmlEntities(itemMatch[1].trim()));
+                  }
+                  pval = items.join(', ');
+                } else {
+                  pval = decodeXmlEntities(inner);
                 }
-                pval = items.join(', ');
-              } else {
-                pval = decodeXmlEntities(inner);
+              }
+              if (pname) {
+                row[sanitizeIdentifier(pname)] = pval;
               }
             }
-            if (pname) {
-              row[sanitizeIdentifier(pname)] = pval;
+          }
+
+          ensureCompTable(tableName, Object.keys(row));
+          if (!compBuffers.has(tableName)) compBuffers.set(tableName, []);
+          compBuffers.get(tableName)!.push(row);
+
+          if (compBuffers.get(tableName)!.length >= 2500) {
+            flushCompBuffer(tableName);
+          }
+        } else {
+          relCount++;
+          const openTag = elemXml.substring(0, elemXml.indexOf('>'));
+          const attrs = parseXmlAttributes(openTag);
+          const rtype = attrs['type'] || 'Relationship';
+          const tableName = sanitizeIdentifier(rtype);
+          relTableMap.set(rtype, tableName);
+
+          const row: Record<string, string> = {
+            type: rtype,
+            comp1_alias: '',
+            comp2_alias: '',
+          };
+
+          for (const [k, v] of Object.entries(attrs)) {
+            if (k !== 'type') {
+              row[sanitizeIdentifier(k)] = v;
             }
           }
-        }
 
-        ensureCompTable(tableName, Object.keys(row));
-        if (!compBuffers.has(tableName)) compBuffers.set(tableName, []);
-        compBuffers.get(tableName)!.push(row);
+          if (!isSelfClosing) {
+            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 15); // length of </relationship> is 15
 
-        if (compBuffers.get(tableName)!.length >= 2500) {
-          flushCompBuffer(tableName);
-        }
-      } else {
-        relCount++;
-        const openTagEnd = elemXml.indexOf('>');
-        const openTag = elemXml.substring(0, openTagEnd);
-        const attrs = parseXmlAttributes(openTag);
-        const rtype = attrs['type'] || 'Relationship';
-        const tableName = sanitizeIdentifier(rtype);
-        relTableMap.set(rtype, tableName);
+            const c1Match = /<comp1alias\s+([^>]*)\/?>/i.exec(body);
+            if (c1Match) {
+              const c1Attrs = parseXmlAttributes(c1Match[1]);
+              if (c1Attrs['alias']) row['comp1_alias'] = c1Attrs['alias'];
+            }
 
-        const row: Record<string, string> = {
-          type: rtype,
-          comp1_alias: '',
-          comp2_alias: '',
-        };
+            const c2Match = /<comp2alias\s+([^>]*)\/?>/i.exec(body);
+            if (c2Match) {
+              const c2Attrs = parseXmlAttributes(c2Match[1]);
+              if (c2Attrs['alias']) row['comp2_alias'] = c2Attrs['alias'];
+            }
 
-        for (const [k, v] of Object.entries(attrs)) {
-          if (k !== 'type') {
-            row[sanitizeIdentifier(k)] = v;
-          }
-        }
+            const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(body);
+            if (descMatch) {
+              row['description'] = decodeXmlEntities(descMatch[1].trim());
+            }
 
-        if (!isSelfClosing) {
-          const body = elemXml.substring(openTagEnd + 1, elemXml.length - closeTag.length);
+            const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
+            if (locMatch) {
+              const lAttrs = parseXmlAttributes(locMatch[1]);
+              if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
+            }
 
-          const c1Match = /<comp1alias\s+([^>]*)\/?>/i.exec(body);
-          if (c1Match) {
-            const c1Attrs = parseXmlAttributes(c1Match[1]);
-            if (c1Attrs['alias']) row['comp1_alias'] = c1Attrs['alias'];
-          }
-
-          const c2Match = /<comp2alias\s+([^>]*)\/?>/i.exec(body);
-          if (c2Match) {
-            const c2Attrs = parseXmlAttributes(c2Match[1]);
-            if (c2Attrs['alias']) row['comp2_alias'] = c2Attrs['alias'];
-          }
-
-          const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(body);
-          if (descMatch) {
-            row['description'] = decodeXmlEntities(descMatch[1].trim());
-          }
-
-          const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
-          if (locMatch) {
-            const lAttrs = parseXmlAttributes(locMatch[1]);
-            if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
-          }
-
-          const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
-          let propMatch;
-          while ((propMatch = propRegex.exec(body)) !== null) {
-            const pAttrStr = propMatch[1] || propMatch[3] || '';
-            const pAttrs = parseXmlAttributes(pAttrStr);
-            const pname = pAttrs['name'];
-            let pval = pAttrs['value'] || '';
-            if (!pval && propMatch[2]) {
-              const inner = propMatch[2].trim();
-              if (inner.includes('<listItem')) {
-                const items: string[] = [];
-                const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
-                let itemMatch;
-                while ((itemMatch = itemRegex.exec(inner)) !== null) {
-                  items.push(decodeXmlEntities(itemMatch[1].trim()));
+            const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+            let propMatch;
+            while ((propMatch = propRegex.exec(body)) !== null) {
+              const pAttrStr = propMatch[1] || propMatch[3] || '';
+              const pAttrs = parseXmlAttributes(pAttrStr);
+              const pname = pAttrs['name'];
+              let pval = pAttrs['value'] || '';
+              if (!pval && propMatch[2]) {
+                const inner = propMatch[2].trim();
+                if (inner.includes('<listItem')) {
+                  const items: string[] = [];
+                  const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+                  let itemMatch;
+                  while ((itemMatch = itemRegex.exec(inner)) !== null) {
+                    items.push(decodeXmlEntities(itemMatch[1].trim()));
+                  }
+                  pval = items.join(', ');
+                } else {
+                  pval = decodeXmlEntities(inner);
                 }
-                pval = items.join(', ');
-              } else {
-                pval = decodeXmlEntities(inner);
+              }
+              if (pname) {
+                row[sanitizeIdentifier(pname)] = pval;
               }
             }
-            if (pname) {
-              row[sanitizeIdentifier(pname)] = pval;
-            }
+          }
+
+          ensureRelTable(tableName, Object.keys(row));
+          if (!relBuffers.has(tableName)) relBuffers.set(tableName, []);
+          relBuffers.get(tableName)!.push(row);
+
+          if (relBuffers.get(tableName)!.length >= 2500) {
+            flushRelBuffer(tableName);
           }
         }
+      }
 
-        ensureRelTable(tableName, Object.keys(row));
-        if (!relBuffers.has(tableName)) relBuffers.set(tableName, []);
-        relBuffers.get(tableName)!.push(row);
+      buffer = buffer.substring(lastUnparsedPos);
 
-        if (relBuffers.get(tableName)!.length >= 2500) {
-          flushRelBuffer(tableName);
+      const now = performance.now();
+      if (now - lastReport > 150 || (compCount + relCount) % 2500 === 0) {
+        const pct = Math.min(95, Math.max(5, Math.round((bytesProcessed / totalBytes) * 95)));
+        self.postMessage({
+          type: 'PROGRESS',
+          stage: 'ingest',
+          percent: pct,
+          message: `Streaming & indexing: ${compCount.toLocaleString()} components, ${relCount.toLocaleString()} relationships inserted...`,
+          components_ingested: compCount,
+          relationships_ingested: relCount,
+          bytes_processed: bytesProcessed,
+          total_bytes: totalBytes,
+          elapsed_seconds: Math.round((now - startTime) / 100) / 10,
+        } as WorkerProgressMessage);
+        lastReport = now;
+      }
+    }
+
+    // Flush all remaining buffers
+    for (const [tbl] of compBuffers) {
+      flushCompBuffer(tbl);
+    }
+    for (const [tbl] of relBuffers) {
+      flushRelBuffer(tbl);
+    }
+
+    // Generate Indexes
+    self.postMessage({
+      type: 'PROGRESS',
+      stage: 'indexing',
+      percent: 96,
+      message: 'Generating B-Tree indexes for fast relational traversal...',
+      components_ingested: compCount,
+      relationships_ingested: relCount,
+      bytes_processed: totalBytes,
+      total_bytes: totalBytes,
+    } as WorkerProgressMessage);
+
+    for (const [tbl, cols] of tableColumns) {
+      if (cols.has('comp1_alias')) {
+        try {
+          database.exec(`CREATE INDEX IF NOT EXISTS "idx_${tbl}_c1" ON "${tbl}" ("comp1_alias");`);
+          database.exec(`CREATE INDEX IF NOT EXISTS "idx_${tbl}_c2" ON "${tbl}" ("comp2_alias");`);
+        } catch {
+          // index creation error ignored
+        }
+      }
+      if (cols.has('parent_alias')) {
+        try {
+          database.exec(`CREATE INDEX IF NOT EXISTS "idx_${tbl}_parent" ON "${tbl}" ("parent_alias");`);
+        } catch {
+          // index creation error ignored
         }
       }
     }
 
-    buffer = buffer.substring(pos);
+    const elapsed = (performance.now() - startTime) / 1000;
+    const payloadId = filename.replace(/\.[^/.]+$/, '').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
 
-    const now = performance.now();
-    if (now - lastReport > 200 || (compCount + relCount) % 5000 === 0) {
-      const pct = Math.min(95, Math.max(5, Math.round((bytesProcessed / totalBytes) * 95)));
-      self.postMessage({
-        type: 'PROGRESS',
-        stage: 'ingest',
-        percent: pct,
-        message: `Streaming & indexing: ${compCount.toLocaleString()} components, ${relCount.toLocaleString()} relationships inserted...`,
-        components_ingested: compCount,
-        relationships_ingested: relCount,
-        bytes_processed: bytesProcessed,
-        total_bytes: totalBytes,
-        elapsed_seconds: Math.round((now - startTime) / 100) / 10,
-      } as WorkerProgressMessage);
-      lastReport = now;
-    }
+    currentPayloadInfo = {
+      id: payloadId,
+      filename,
+      size_bytes: file.size,
+      size_mb: Math.round((file.size / (1024 * 1024)) * 10) / 10,
+      total_components: compCount,
+      total_relationships: relCount,
+      total_tables: tableColumns.size,
+      last_modified: Date.now() / 1000,
+      status: 'ready',
+    };
+
+    const typesData = getPayloadTypesSync(database);
+
+    self.postMessage({
+      type: 'PROGRESS',
+      stage: 'complete',
+      percent: 100,
+      message: `Ready in ${elapsed.toFixed(1)}s (${compCount.toLocaleString()} components, ${relCount.toLocaleString()} relationships indexed)!`,
+      components_ingested: compCount,
+      relationships_ingested: relCount,
+      bytes_processed: totalBytes,
+      total_bytes: totalBytes,
+      elapsed_seconds: Math.round(elapsed * 10) / 10,
+    } as WorkerProgressMessage);
+
+    self.postMessage({
+      type: 'READY',
+      payload_info: currentPayloadInfo,
+      types_data: typesData,
+    } as WorkerReadyMessage);
+
+    return {
+      payload_info: currentPayloadInfo,
+      types_data: typesData,
+    };
+  } catch (err: any) {
+    self.postMessage({
+      type: 'PROGRESS',
+      stage: 'error',
+      percent: 0,
+      message: `Ingestion failed: ${err?.message || String(err)}`,
+      components_ingested: 0,
+      relationships_ingested: 0,
+      bytes_processed: 0,
+      total_bytes: file.size || 1,
+    } as WorkerProgressMessage);
+    throw err;
   }
-
-  // Flush all remaining buffers
-  for (const [tbl] of compBuffers) {
-    flushCompBuffer(tbl);
-  }
-  for (const [tbl] of relBuffers) {
-    flushRelBuffer(tbl);
-  }
-
-  // Generate Indexes
-  self.postMessage({
-    type: 'PROGRESS',
-    stage: 'indexing',
-    percent: 96,
-    message: 'Generating B-Tree indexes for fast relational traversal...',
-    components_ingested: compCount,
-    relationships_ingested: relCount,
-    bytes_processed: totalBytes,
-    total_bytes: totalBytes,
-  } as WorkerProgressMessage);
-
-  for (const [tbl, cols] of tableColumns) {
-    if (cols.has('comp1_alias')) {
-      try {
-        database.exec(`CREATE INDEX IF NOT EXISTS "idx_${tbl}_c1" ON "${tbl}" ("comp1_alias");`);
-        database.exec(`CREATE INDEX IF NOT EXISTS "idx_${tbl}_c2" ON "${tbl}" ("comp2_alias");`);
-      } catch (_) {}
-    }
-    if (cols.has('parent_alias')) {
-      try {
-        database.exec(`CREATE INDEX IF NOT EXISTS "idx_${tbl}_parent" ON "${tbl}" ("parent_alias");`);
-      } catch (_) {}
-    }
-  }
-
-  const elapsed = (performance.now() - startTime) / 1000;
-  const payloadId = filename.replace(/\.[^/.]+$/, '').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-
-  currentPayloadInfo = {
-    id: payloadId,
-    filename,
-    size_bytes: file.size,
-    size_mb: Math.round((file.size / (1024 * 1024)) * 10) / 10,
-    total_components: compCount,
-    total_relationships: relCount,
-    total_tables: tableColumns.size,
-    last_modified: Date.now() / 1000,
-    status: 'ready',
-  };
-
-  const typesData = getPayloadTypesSync(database);
-
-  self.postMessage({
-    type: 'PROGRESS',
-    stage: 'complete',
-    percent: 100,
-    message: `Ready in ${elapsed.toFixed(1)}s (${compCount.toLocaleString()} components, ${relCount.toLocaleString()} relationships indexed)!`,
-    components_ingested: compCount,
-    relationships_ingested: relCount,
-    bytes_processed: totalBytes,
-    total_bytes: totalBytes,
-    elapsed_seconds: Math.round(elapsed * 10) / 10,
-  } as WorkerProgressMessage);
-
-  self.postMessage({
-    type: 'READY',
-    payload_info: currentPayloadInfo,
-    types_data: typesData,
-  } as WorkerReadyMessage);
 }
 
 // =====================================================================
@@ -1017,7 +1047,10 @@ self.onmessage = async (e: MessageEvent) => {
     switch (action) {
       case 'INGEST_FILE': {
         const { file, filename } = payload;
-        await ingestTuxFile(file, filename);
+        const result = await ingestTuxFile(file, filename);
+        if (id !== undefined) {
+          self.postMessage({ id, success: true, data: result });
+        }
         break;
       }
 

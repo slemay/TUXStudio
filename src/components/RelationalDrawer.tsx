@@ -72,6 +72,19 @@ export const RelationalDrawer: React.FC<RelationalDrawerProps> = ({
     document.addEventListener('mouseup', onMouseUp);
   };
 
+  // Group relationships by type
+  const groupedRelationships = React.useMemo(() => {
+    if (!entityDetail) return {};
+    const groups: Record<string, ConnectedRelationship[]> = {};
+    for (const rel of entityDetail.relationships) {
+      if (!groups[rel.relationship_type]) {
+        groups[rel.relationship_type] = [];
+      }
+      groups[rel.relationship_type].push(rel);
+    }
+    return groups;
+  }, [entityDetail]);
+
   if (!entityDetail && !isLoading) return null;
 
   const handleCopy = (text: string) => {
@@ -89,19 +102,6 @@ export const RelationalDrawer: React.FC<RelationalDrawerProps> = ({
     if (t.includes('organization')) return <Building className="w-3.5 h-3.5 text-purple-400" />;
     return <Box className="w-3.5 h-3.5 text-slate-400" />;
   };
-
-  // Group relationships by type
-  const groupedRelationships = React.useMemo(() => {
-    if (!entityDetail) return {};
-    const groups: Record<string, ConnectedRelationship[]> = {};
-    for (const rel of entityDetail.relationships) {
-      if (!groups[rel.relationship_type]) {
-        groups[rel.relationship_type] = [];
-      }
-      groups[rel.relationship_type].push(rel);
-    }
-    return groups;
-  }, [entityDetail]);
 
   return (
     <div

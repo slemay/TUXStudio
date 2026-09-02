@@ -56,34 +56,25 @@ export async function uploadTuxPayload(
   filename: string,
   onProgress?: (progress: WorkerProgressMessage) => void
 ): Promise<{ payload_info: PayloadInfo; types_data: PayloadTypesResponse }> {
-  const w = getTuxWorker();
-
-  return new Promise((resolve) => {
-    const handleProgress = (progress: WorkerProgressMessage) => {
-      if (onProgress) onProgress(progress);
+  let unsubscribe: (() => void) | null = null;
+  if (onProgress) {
+    const listener = (progress: WorkerProgressMessage) => {
+      onProgress(progress);
     };
+    progressListeners.add(listener);
+    unsubscribe = () => progressListeners.delete(listener);
+  }
 
-    progressListeners.add(handleProgress);
-
-    const onReadyMessage = (e: MessageEvent) => {
-      if (e.data.type === 'READY') {
-        w.removeEventListener('message', onReadyMessage);
-        progressListeners.delete(handleProgress);
-        resolve({
-          payload_info: e.data.payload_info,
-          types_data: e.data.types_data,
-        });
-      }
-    };
-
-    w.addEventListener('message', onReadyMessage);
-
-    // Trigger ingestion in worker
-    w.postMessage({
-      action: 'INGEST_FILE',
-      payload: { file, filename },
+  try {
+    return await callWorker<{ payload_info: PayloadInfo; types_data: PayloadTypesResponse }>('INGEST_FILE', {
+      file,
+      filename,
     });
-  });
+  } finally {
+    if (unsubscribe) {
+      unsubscribe();
+    }
+  }
 }
 
 export async function fetchPayloads(): Promise<{ payloads: PayloadInfo[] }> {
