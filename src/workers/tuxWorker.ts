@@ -394,34 +394,33 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     } as WorkerProgressMessage);
 
     while (pos < textLen) {
-      const nextComp = fullText.indexOf('<component', pos);
-      const nextRel = fullText.indexOf('<relationship', pos);
+      const tagStart = fullText.indexOf('<', pos);
+      if (tagStart === -1) break;
 
-      let targetPos = -1;
-      let isComp = false;
-
-      if (nextComp !== -1 && nextRel !== -1) {
-        if (nextComp < nextRel) {
-          targetPos = nextComp;
-          isComp = true;
-        } else {
-          targetPos = nextRel;
-          isComp = false;
-        }
-      } else if (nextComp !== -1) {
-        targetPos = nextComp;
-        isComp = true;
-      } else if (nextRel !== -1) {
-        targetPos = nextRel;
-        isComp = false;
-      } else {
-        break;
+      const c1 = fullText.charCodeAt(tagStart + 1);
+      // Skip closing tags '</', comments '<!', PIs '<?'
+      if (c1 === 47 || c1 === 33 || c1 === 63) {
+        const nextEnd = fullText.indexOf('>', tagStart + 2);
+        pos = nextEnd === -1 ? textLen : nextEnd + 1;
+        continue;
       }
 
-      const openTagEnd = fullText.indexOf('>', targetPos);
+      let isComp = false;
+
+      if (fullText.startsWith('component', tagStart + 1)) {
+        isComp = true;
+      } else if (fullText.startsWith('relationship', tagStart + 1)) {
+        isComp = false;
+      } else {
+        const nextEnd = fullText.indexOf('>', tagStart + 1);
+        pos = nextEnd === -1 ? textLen : nextEnd + 1;
+        continue;
+      }
+
+      const openTagEnd = fullText.indexOf('>', tagStart + 10);
       if (openTagEnd === -1) break;
 
-      const openTagStr = fullText.substring(targetPos, openTagEnd + 1);
+      const openTagStr = fullText.substring(tagStart, openTagEnd + 1);
       const isSelfClosing = openTagStr.trimEnd().endsWith('/>');
 
       let elemEnd = -1;
