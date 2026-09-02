@@ -248,7 +248,6 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     }
 
     const totalBytes = file.size || 1;
-    let bytesProcessed = 0;
     let compCount = 0;
     let relCount = 0;
     let bufferedCount = 0;
@@ -370,287 +369,304 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
       type: 'PROGRESS',
       stage: 'ingest',
       percent: 5,
-      message: 'Initializing high-speed streaming XML parser in WebAssembly worker...',
+      message: 'Reading XML payload into high-performance memory buffer...',
       components_ingested: 0,
       relationships_ingested: 0,
       bytes_processed: 0,
       total_bytes: totalBytes,
     } as WorkerProgressMessage);
 
-    // Stream XML using ReadableStream
-    const stream = file.stream();
-    const reader = stream.getReader();
-    const decoder = new TextDecoder('utf-8');
-
-    let buffer = '';
+    // Read full XML text in a single fast I/O call
+    const fullText = await file.text();
+    const textLen = fullText.length;
+    let pos = 0;
     let lastReport = performance.now();
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    self.postMessage({
+      type: 'PROGRESS',
+      stage: 'ingest',
+      percent: 10,
+      message: 'Parsing and indexing entities into SQLite WebAssembly...',
+      components_ingested: 0,
+      relationships_ingested: 0,
+      bytes_processed: 0,
+      total_bytes: totalBytes,
+    } as WorkerProgressMessage);
 
-      bytesProcessed += value.byteLength;
-      buffer += decoder.decode(value, { stream: true });
+    while (pos < textLen) {
+      const nextComp = fullText.indexOf('<component', pos);
+      const nextRel = fullText.indexOf('<relationship', pos);
 
-      // Process complete XML elements in the buffer
-      let pos = 0;
-      let lastUnparsedPos = 0;
+      let targetPos = -1;
+      let isComp = false;
 
-      while (pos < buffer.length) {
-        const nextComp = buffer.indexOf('<component', pos);
-        const nextRel = buffer.indexOf('<relationship', pos);
-
-        let targetPos = -1;
-        let isComp = false;
-
-        if (nextComp !== -1 && nextRel !== -1) {
-          if (nextComp < nextRel) {
-            targetPos = nextComp;
-            isComp = true;
-          } else {
-            targetPos = nextRel;
-            isComp = false;
-          }
-        } else if (nextComp !== -1) {
+      if (nextComp !== -1 && nextRel !== -1) {
+        if (nextComp < nextRel) {
           targetPos = nextComp;
           isComp = true;
-        } else if (nextRel !== -1) {
+        } else {
           targetPos = nextRel;
           isComp = false;
-        } else {
-          lastUnparsedPos = pos;
-          break;
         }
+      } else if (nextComp !== -1) {
+        targetPos = nextComp;
+        isComp = true;
+      } else if (nextRel !== -1) {
+        targetPos = nextRel;
+        isComp = false;
+      } else {
+        break;
+      }
 
-        const openTagEnd = buffer.indexOf('>', targetPos);
-        if (openTagEnd === -1) {
-          lastUnparsedPos = targetPos;
-          break;
-        }
+      const openTagEnd = fullText.indexOf('>', targetPos);
+      if (openTagEnd === -1) break;
 
-        const openTagStr = buffer.substring(targetPos, openTagEnd + 1);
-        const isSelfClosing = openTagStr.trimEnd().endsWith('/>');
+      const openTagStr = fullText.substring(targetPos, openTagEnd + 1);
+      const isSelfClosing = openTagStr.trimEnd().endsWith('/>');
 
-        let elemEnd = -1;
-        if (isSelfClosing) {
+      let elemEnd = -1;
+      let body = '';
+
+      if (isSelfClosing) {
+        elemEnd = openTagEnd + 1;
+      } else {
+        const closeTag = isComp ? '</component>' : '</relationship>';
+        const endTagPos = fullText.indexOf(closeTag, openTagEnd);
+        if (endTagPos === -1) {
           elemEnd = openTagEnd + 1;
         } else {
-          const closeTag = isComp ? '</component>' : '</relationship>';
-          const endTagPos = buffer.indexOf(closeTag, openTagEnd);
-          if (endTagPos === -1) {
-            lastUnparsedPos = targetPos;
-            break;
-          }
           elemEnd = endTagPos + closeTag.length;
-        }
-
-        const elemXml = buffer.substring(targetPos, elemEnd);
-        pos = elemEnd;
-        lastUnparsedPos = pos;
-
-        if (isComp) {
-          compCount++;
-          bufferedCount++;
-          const openTag = elemXml.substring(0, elemXml.indexOf('>'));
-          const attrs = parseXmlAttributes(openTag);
-          const ctype = attrs['type'] || 'Component';
-          const tableName = sanitizeIdentifier(ctype);
-          compTableMap.set(ctype, tableName);
-
-          let alias = attrs['alias'] || '';
-          const name = attrs['name'] || '';
-          if (!alias) {
-            alias = name ? `${ctype}:${name}` : `${ctype}:Auto_${compCount}`;
-            if (seenAliases.has(alias)) {
-              alias = `${alias}:${compCount}`;
-            }
-          }
-          seenAliases.add(alias);
-
-          const row: Record<string, string> = {
-            alias,
-            name,
-            type: ctype,
-          };
-
-          for (const [k, v] of Object.entries(attrs)) {
-            if (k !== 'alias' && k !== 'name' && k !== 'type') {
-              row[sanitizeIdentifier(k)] = v;
-            }
-          }
-
-          if (!isSelfClosing) {
-            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 12);
-            if (body.includes('<')) {
-              if (body.includes('<parentalias')) {
-                const pIdx = body.indexOf('<parentalias');
-                const pEnd = body.indexOf('>', pIdx);
-                if (pEnd !== -1) {
-                  const pAttrs = parseXmlAttributes(body.substring(pIdx, pEnd + 1));
-                  if (pAttrs['alias']) row['parent_alias'] = pAttrs['alias'];
-                }
-              }
-
-              if (body.includes('<description>')) {
-                const dStart = body.indexOf('<description>') + 13;
-                const dEnd = body.indexOf('</description>', dStart);
-                if (dEnd !== -1) {
-                  row['description'] = decodeXmlEntities(body.substring(dStart, dEnd).trim());
-                }
-              }
-
-              if (body.includes('<locator')) {
-                const lIdx = body.indexOf('<locator');
-                const lEnd = body.indexOf('>', lIdx);
-                if (lEnd !== -1) {
-                  const lAttrs = parseXmlAttributes(body.substring(lIdx, lEnd + 1));
-                  if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
-                }
-              }
-
-              if (body.includes('<property')) {
-                PROP_REGEX.lastIndex = 0;
-                let propMatch;
-                while ((propMatch = PROP_REGEX.exec(body)) !== null) {
-                  const pAttrStr = propMatch[1] || propMatch[3] || '';
-                  const pAttrs = parseXmlAttributes(pAttrStr);
-                  const pname = pAttrs['name'];
-                  let pval = pAttrs['value'] || '';
-                  if (!pval && propMatch[2]) {
-                    const inner = propMatch[2].trim();
-                    if (inner.includes('<listItem')) {
-                      const items: string[] = [];
-                      ITEM_REGEX.lastIndex = 0;
-                      let itemMatch;
-                      while ((itemMatch = ITEM_REGEX.exec(inner)) !== null) {
-                        items.push(decodeXmlEntities(itemMatch[1].trim()));
-                      }
-                      pval = items.join(', ');
-                    } else {
-                      pval = decodeXmlEntities(inner);
-                    }
-                  }
-                  if (pname) {
-                    row[sanitizeIdentifier(pname)] = pval;
-                  }
-                }
-              }
-            }
-          }
-
-          ensureCompTable(tableName, row);
-          if (!compBuffers.has(tableName)) compBuffers.set(tableName, []);
-          compBuffers.get(tableName)!.push(row);
-        } else {
-          relCount++;
-          bufferedCount++;
-          const openTag = elemXml.substring(0, elemXml.indexOf('>'));
-          const attrs = parseXmlAttributes(openTag);
-          const rtype = attrs['type'] || 'Relationship';
-          const tableName = sanitizeIdentifier(rtype);
-          relTableMap.set(rtype, tableName);
-
-          const row: Record<string, string> = {
-            type: rtype,
-            comp1_alias: '',
-            comp2_alias: '',
-          };
-
-          for (const [k, v] of Object.entries(attrs)) {
-            if (k !== 'type') {
-              row[sanitizeIdentifier(k)] = v;
-            }
-          }
-
-          if (!isSelfClosing) {
-            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 15);
-            if (body.includes('<')) {
-              const c1Idx = body.indexOf('<comp1alias');
-              if (c1Idx !== -1) {
-                const c1End = body.indexOf('>', c1Idx);
-                const c1Tag = body.substring(c1Idx, c1End + 1);
-                const c1Attrs = parseXmlAttributes(c1Tag);
-                if (c1Attrs['alias']) row['comp1_alias'] = c1Attrs['alias'];
-              }
-
-              const c2Idx = body.indexOf('<comp2alias');
-              if (c2Idx !== -1) {
-                const c2End = body.indexOf('>', c2Idx);
-                const c2Tag = body.substring(c2Idx, c2End + 1);
-                const c2Attrs = parseXmlAttributes(c2Tag);
-                if (c2Attrs['alias']) row['comp2_alias'] = c2Attrs['alias'];
-              }
-
-              if (body.includes('<description>')) {
-                const dStart = body.indexOf('<description>') + 13;
-                const dEnd = body.indexOf('</description>', dStart);
-                if (dEnd !== -1) {
-                  row['description'] = decodeXmlEntities(body.substring(dStart, dEnd).trim());
-                }
-              }
-
-              if (body.includes('<locator')) {
-                const lIdx = body.indexOf('<locator');
-                const lEnd = body.indexOf('>', lIdx);
-                if (lEnd !== -1) {
-                  const lAttrs = parseXmlAttributes(body.substring(lIdx, lEnd + 1));
-                  if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
-                }
-              }
-
-              if (body.includes('<property')) {
-                PROP_REGEX.lastIndex = 0;
-                let propMatch;
-                while ((propMatch = PROP_REGEX.exec(body)) !== null) {
-                  const pAttrStr = propMatch[1] || propMatch[3] || '';
-                  const pAttrs = parseXmlAttributes(pAttrStr);
-                  const pname = pAttrs['name'];
-                  let pval = pAttrs['value'] || '';
-                  if (!pval && propMatch[2]) {
-                    const inner = propMatch[2].trim();
-                    if (inner.includes('<listItem')) {
-                      const items: string[] = [];
-                      ITEM_REGEX.lastIndex = 0;
-                      let itemMatch;
-                      while ((itemMatch = ITEM_REGEX.exec(inner)) !== null) {
-                        items.push(decodeXmlEntities(itemMatch[1].trim()));
-                      }
-                      pval = items.join(', ');
-                    } else {
-                      pval = decodeXmlEntities(inner);
-                    }
-                  }
-                  if (pname) {
-                    row[sanitizeIdentifier(pname)] = pval;
-                  }
-                }
-              }
-            }
-          }
-
-          ensureRelTable(tableName, row);
-          if (!relBuffers.has(tableName)) relBuffers.set(tableName, []);
-          relBuffers.get(tableName)!.push(row);
-        }
-
-        if (bufferedCount >= 20000) {
-          flushAllBuffers();
+          body = fullText.substring(openTagEnd + 1, endTagPos);
         }
       }
 
-      buffer = buffer.substring(lastUnparsedPos);
+      pos = elemEnd;
+
+      if (isComp) {
+        compCount++;
+        bufferedCount++;
+        const attrs = parseXmlAttributes(openTagStr);
+        const ctype = attrs['type'] || 'Component';
+        const tableName = sanitizeIdentifier(ctype);
+        compTableMap.set(ctype, tableName);
+
+        let alias = attrs['alias'] || '';
+        const name = attrs['name'] || '';
+        if (!alias) {
+          alias = name ? `${ctype}:${name}` : `${ctype}:Auto_${compCount}`;
+          if (seenAliases.has(alias)) {
+            alias = `${alias}:${compCount}`;
+          }
+        }
+        seenAliases.add(alias);
+
+        const row: Record<string, string> = {
+          alias,
+          name,
+          type: ctype,
+        };
+
+        for (const k in attrs) {
+          if (k !== 'alias' && k !== 'name' && k !== 'type') {
+            row[sanitizeIdentifier(k)] = attrs[k];
+          }
+        }
+
+        if (body && body.includes('<')) {
+          if (body.includes('<parentalias')) {
+            const pIdx = body.indexOf('<parentalias');
+            const pEnd = body.indexOf('>', pIdx);
+            if (pEnd !== -1) {
+              const pTag = body.substring(pIdx, pEnd + 1);
+              const aIdx = pTag.indexOf('alias="');
+              if (aIdx !== -1) {
+                const aStart = aIdx + 7;
+                const aEnd = pTag.indexOf('"', aStart);
+                if (aEnd !== -1) row['parent_alias'] = pTag.substring(aStart, aEnd);
+              }
+            }
+          }
+
+          if (body.includes('<description>')) {
+            const dStart = body.indexOf('<description>') + 13;
+            const dEnd = body.indexOf('</description>', dStart);
+            if (dEnd !== -1) {
+              row['description'] = decodeXmlEntities(body.substring(dStart, dEnd).trim());
+            }
+          }
+
+          if (body.includes('<locator')) {
+            const lIdx = body.indexOf('<locator');
+            const lEnd = body.indexOf('>', lIdx);
+            if (lEnd !== -1) {
+              const lTag = body.substring(lIdx, lEnd + 1);
+              const cIdx = lTag.indexOf('class="');
+              if (cIdx !== -1) {
+                const cStart = cIdx + 7;
+                const cEnd = lTag.indexOf('"', cStart);
+                if (cEnd !== -1) row['locator_class'] = lTag.substring(cStart, cEnd);
+              }
+            }
+          }
+
+          if (body.includes('<property')) {
+            PROP_REGEX.lastIndex = 0;
+            let propMatch;
+            while ((propMatch = PROP_REGEX.exec(body)) !== null) {
+              const pAttrStr = propMatch[1] || propMatch[3] || '';
+              const pAttrs = parseXmlAttributes(pAttrStr);
+              const pname = pAttrs['name'];
+              let pval = pAttrs['value'] || '';
+              if (!pval && propMatch[2]) {
+                const inner = propMatch[2].trim();
+                if (inner.includes('<listItem')) {
+                  const items: string[] = [];
+                  ITEM_REGEX.lastIndex = 0;
+                  let itemMatch;
+                  while ((itemMatch = ITEM_REGEX.exec(inner)) !== null) {
+                    items.push(decodeXmlEntities(itemMatch[1].trim()));
+                  }
+                  pval = items.join(', ');
+                } else {
+                  pval = decodeXmlEntities(inner);
+                }
+              }
+              if (pname) {
+                row[sanitizeIdentifier(pname)] = pval;
+              }
+            }
+          }
+        }
+
+        ensureCompTable(tableName, row);
+        let buf = compBuffers.get(tableName);
+        if (!buf) {
+          buf = [];
+          compBuffers.set(tableName, buf);
+        }
+        buf.push(row);
+      } else {
+        relCount++;
+        bufferedCount++;
+        const attrs = parseXmlAttributes(openTagStr);
+        const rtype = attrs['type'] || 'Relationship';
+        const tableName = sanitizeIdentifier(rtype);
+        relTableMap.set(rtype, tableName);
+
+        const row: Record<string, string> = {
+          type: rtype,
+          comp1_alias: attrs['comp1alias'] || '',
+          comp2_alias: attrs['comp2alias'] || '',
+        };
+
+        for (const k in attrs) {
+          if (k !== 'type' && k !== 'comp1alias' && k !== 'comp2alias') {
+            row[sanitizeIdentifier(k)] = attrs[k];
+          }
+        }
+
+        if (body && body.includes('<')) {
+          if (!row['comp1_alias']) {
+            const c1Idx = body.indexOf('<comp1alias');
+            if (c1Idx !== -1) {
+              const c1End = body.indexOf('>', c1Idx);
+              const aIdx = body.indexOf('alias="', c1Idx);
+              if (aIdx !== -1 && aIdx < c1End) {
+                const aStart = aIdx + 7;
+                const aEnd = body.indexOf('"', aStart);
+                if (aEnd !== -1) row['comp1_alias'] = body.substring(aStart, aEnd);
+              }
+            }
+          }
+
+          if (!row['comp2_alias']) {
+            const c2Idx = body.indexOf('<comp2alias');
+            if (c2Idx !== -1) {
+              const c2End = body.indexOf('>', c2Idx);
+              const aIdx = body.indexOf('alias="', c2Idx);
+              if (aIdx !== -1 && aIdx < c2End) {
+                const aStart = aIdx + 7;
+                const aEnd = body.indexOf('"', aStart);
+                if (aEnd !== -1) row['comp2_alias'] = body.substring(aStart, aEnd);
+              }
+            }
+          }
+
+          if (body.includes('<description>')) {
+            const dStart = body.indexOf('<description>') + 13;
+            const dEnd = body.indexOf('</description>', dStart);
+            if (dEnd !== -1) {
+              row['description'] = decodeXmlEntities(body.substring(dStart, dEnd).trim());
+            }
+          }
+
+          if (body.includes('<locator')) {
+            const lIdx = body.indexOf('<locator');
+            const lEnd = body.indexOf('>', lIdx);
+            if (lEnd !== -1) {
+              const lTag = body.substring(lIdx, lEnd + 1);
+              const cIdx = lTag.indexOf('class="');
+              if (cIdx !== -1) {
+                const cStart = cIdx + 7;
+                const cEnd = lTag.indexOf('"', cStart);
+                if (cEnd !== -1) row['locator_class'] = lTag.substring(cStart, cEnd);
+              }
+            }
+          }
+
+          if (body.includes('<property')) {
+            PROP_REGEX.lastIndex = 0;
+            let propMatch;
+            while ((propMatch = PROP_REGEX.exec(body)) !== null) {
+              const pAttrStr = propMatch[1] || propMatch[3] || '';
+              const pAttrs = parseXmlAttributes(pAttrStr);
+              const pname = pAttrs['name'];
+              let pval = pAttrs['value'] || '';
+              if (!pval && propMatch[2]) {
+                const inner = propMatch[2].trim();
+                if (inner.includes('<listItem')) {
+                  const items: string[] = [];
+                  ITEM_REGEX.lastIndex = 0;
+                  let itemMatch;
+                  while ((itemMatch = ITEM_REGEX.exec(inner)) !== null) {
+                    items.push(decodeXmlEntities(itemMatch[1].trim()));
+                  }
+                  pval = items.join(', ');
+                } else {
+                  pval = decodeXmlEntities(inner);
+                }
+              }
+              if (pname) {
+                row[sanitizeIdentifier(pname)] = pval;
+              }
+            }
+          }
+        }
+
+        ensureRelTable(tableName, row);
+        let buf = relBuffers.get(tableName);
+        if (!buf) {
+          buf = [];
+          relBuffers.set(tableName, buf);
+        }
+        buf.push(row);
+      }
+
+      if (bufferedCount >= 25000) {
+        flushAllBuffers();
+      }
 
       const now = performance.now();
-      if (now - lastReport > 150 || (compCount + relCount) % 5000 === 0) {
-        const pct = Math.min(95, Math.max(5, Math.round((bytesProcessed / totalBytes) * 95)));
+      if (now - lastReport > 200) {
+        const pct = Math.min(95, Math.max(10, Math.round((pos / textLen) * 95)));
         self.postMessage({
           type: 'PROGRESS',
           stage: 'ingest',
           percent: pct,
-          message: `Streaming & indexing: ${compCount.toLocaleString()} components, ${relCount.toLocaleString()} relationships inserted...`,
+          message: `Parsing & indexing: ${compCount.toLocaleString()} components, ${relCount.toLocaleString()} relationships inserted...`,
           components_ingested: compCount,
           relationships_ingested: relCount,
-          bytes_processed: bytesProcessed,
+          bytes_processed: Math.round((pos / textLen) * totalBytes),
           total_bytes: totalBytes,
           elapsed_seconds: Math.round((now - startTime) / 100) / 10,
         } as WorkerProgressMessage);
@@ -712,14 +728,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
 
     const typesData = getPayloadTypesSync(database);
 
-    // Persist to IndexedDB for full cross-session persistence across browser refreshes
-    try {
-      const binary = database.export();
-      await saveDatabaseToIndexedDb(payloadId, currentPayloadInfo, binary);
-    } catch (persistErr) {
-      console.warn('Failed to persist database to IndexedDB:', persistErr);
-    }
-
+    // Notify UI that dataset is ready IMMEDIATELY so user can start exploring
     self.postMessage({
       type: 'PROGRESS',
       stage: 'complete',
@@ -737,6 +746,16 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
       payload_info: currentPayloadInfo,
       types_data: typesData,
     } as WorkerReadyMessage);
+
+    // Persist to IndexedDB asynchronously in background without blocking the UI
+    setTimeout(async () => {
+      try {
+        const binary = database.export();
+        await saveDatabaseToIndexedDb(payloadId, currentPayloadInfo, binary);
+      } catch (persistErr) {
+        console.warn('Background IndexedDB persist error:', persistErr);
+      }
+    }, 10);
 
     return {
       payload_info: currentPayloadInfo,
