@@ -1,4 +1,4 @@
-import initSqlJs, { type Database, type Statement } from 'sql.js';
+import initSqlJs, { type Database } from 'sql.js';
 import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import JSZip from 'jszip';
 
@@ -43,13 +43,18 @@ const tableColumns = new Map<string, Set<string>>();
 const compTableMap = new Map<string, string>();
 const relTableMap = new Map<string, string>();
 
+const sanitizeMap = new Map<string, string>();
 function sanitizeIdentifier(name: string): string {
   if (!name) return '';
-  return name.trim().replace(/ /g, '_').replace(/-/g, '_').replace(/\?/g, '').replace(/&/g, 'and').replace(/\./g, '_');
+  const cached = sanitizeMap.get(name);
+  if (cached !== undefined) return cached;
+  const sanitized = name.trim().replace(/ /g, '_').replace(/-/g, '_').replace(/\?/g, '').replace(/&/g, 'and').replace(/\./g, '_');
+  sanitizeMap.set(name, sanitized);
+  return sanitized;
 }
 
 function decodeXmlEntities(str: string): string {
-  if (!str) return '';
+  if (!str || !str.includes('&')) return str || '';
   return str
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -64,7 +69,8 @@ function parseXmlAttributes(attrStr: string): Record<string, string> {
   const regex = /([a-zA-Z0-9_:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
   let match;
   while ((match = regex.exec(attrStr)) !== null) {
-    attrs[match[1]] = decodeXmlEntities(match[2] !== undefined ? match[2] : match[3]);
+    const rawVal = match[2] !== undefined ? match[2] : match[3];
+    attrs[match[1]] = rawVal.includes('&') ? decodeXmlEntities(rawVal) : rawVal;
   }
   return attrs;
 }
@@ -79,7 +85,7 @@ async function getOrInitDb(): Promise<Database> {
     locateFile: () => sqlWasmUrl,
   });
   db = new SQL.Database();
-  db.exec('PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;');
+  db.exec('PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -64000;');
   return db;
 }
 
@@ -92,6 +98,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
   tableColumns.clear();
   compTableMap.clear();
   relTableMap.clear();
+  sanitizeMap.clear();
 
   try {
     const database = await getOrInitDb();
@@ -111,6 +118,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     let bytesProcessed = 0;
     let compCount = 0;
     let relCount = 0;
+    let bufferedCount = 0;
 
     const compBuffers = new Map<string, Array<Record<string, string>>>();
     const relBuffers = new Map<string, Array<Record<string, string>>>();
@@ -122,7 +130,8 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
         tableColumns.set(tableName, new Set(['alias', 'name', 'type']));
       }
       const colsSet = tableColumns.get(tableName)!;
-      for (const c of rowCols) {
+      for (let i = 0; i < rowCols.length; i++) {
+        const c = rowCols[i];
         if (!colsSet.has(c)) {
           try {
             database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
@@ -140,7 +149,8 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
         tableColumns.set(tableName, new Set(['id', 'type', 'comp1_alias', 'comp2_alias']));
       }
       const colsSet = tableColumns.get(tableName)!;
-      for (const c of rowCols) {
+      for (let i = 0; i < rowCols.length; i++) {
+        const c = rowCols[i];
         if (!colsSet.has(c)) {
           try {
             database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
@@ -152,62 +162,64 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
       }
     };
 
-    const flushCompBuffer = (tableName: string) => {
-      const buffer = compBuffers.get(tableName);
-      if (!buffer || buffer.length === 0) return;
-
-      const colsSet = tableColumns.get(tableName)!;
-      const cols = Array.from(colsSet);
-      const placeholders = cols.map(() => '?').join(', ');
-      const colSql = cols.map((c) => `"${c}"`).join(', ');
-      const sql = `INSERT OR REPLACE INTO "${tableName}" (${colSql}) VALUES (${placeholders})`;
-
+    const flushAllBuffers = () => {
+      if (bufferedCount === 0) return;
       database.exec('BEGIN TRANSACTION;');
-      let stmt: Statement | null = null;
       try {
-        stmt = database.prepare(sql);
-        for (const row of buffer) {
-          const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
-          stmt.run(values);
+        for (const [tbl, buffer] of compBuffers) {
+          if (buffer.length === 0) continue;
+          const colsSet = tableColumns.get(tbl)!;
+          const cols = Array.from(colsSet);
+          const placeholders = cols.map(() => '?').join(', ');
+          const colSql = cols.map((c) => `"${c}"`).join(', ');
+          const sql = `INSERT OR REPLACE INTO "${tbl}" (${colSql}) VALUES (${placeholders})`;
+
+          const stmt = database.prepare(sql);
+          try {
+            for (let i = 0; i < buffer.length; i++) {
+              const row = buffer[i];
+              const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
+              stmt.run(values);
+            }
+          } finally {
+            stmt.free();
+          }
+          buffer.length = 0;
         }
-      } finally {
-        if (stmt) stmt.free();
-        database.exec('COMMIT;');
-      }
-      buffer.length = 0;
-    };
 
-    const flushRelBuffer = (tableName: string) => {
-      const buffer = relBuffers.get(tableName);
-      if (!buffer || buffer.length === 0) return;
+        for (const [tbl, buffer] of relBuffers) {
+          if (buffer.length === 0) continue;
+          const colsSet = tableColumns.get(tbl)!;
+          const cols = Array.from(colsSet).filter((c) => c !== 'id');
+          const placeholders = cols.map(() => '?').join(', ');
+          const colSql = cols.map((c) => `"${c}"`).join(', ');
+          const sql = `INSERT INTO "${tbl}" (${colSql}) VALUES (${placeholders})`;
 
-      const colsSet = tableColumns.get(tableName)!;
-      // Exclude 'id' which is auto-increment
-      const cols = Array.from(colsSet).filter((c) => c !== 'id');
-      const placeholders = cols.map(() => '?').join(', ');
-      const colSql = cols.map((c) => `"${c}"`).join(', ');
-      const sql = `INSERT INTO "${tableName}" (${colSql}) VALUES (${placeholders})`;
-
-      database.exec('BEGIN TRANSACTION;');
-      let stmt: Statement | null = null;
-      try {
-        stmt = database.prepare(sql);
-        for (const row of buffer) {
-          const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
-          stmt.run(values);
+          const stmt = database.prepare(sql);
+          try {
+            for (let i = 0; i < buffer.length; i++) {
+              const row = buffer[i];
+              const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
+              stmt.run(values);
+            }
+          } finally {
+            stmt.free();
+          }
+          buffer.length = 0;
         }
-      } finally {
-        if (stmt) stmt.free();
         database.exec('COMMIT;');
+      } catch (e) {
+        try { database.exec('ROLLBACK;'); } catch (_) {}
+        throw e;
       }
-      buffer.length = 0;
+      bufferedCount = 0;
     };
 
     self.postMessage({
       type: 'PROGRESS',
       stage: 'ingest',
       percent: 5,
-      message: 'Initializing streaming XML parser in WebAssembly worker...',
+      message: 'Initializing high-speed streaming XML parser in WebAssembly worker...',
       components_ingested: 0,
       relationships_ingested: 0,
       bytes_processed: 0,
@@ -234,7 +246,6 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
       let lastUnparsedPos = 0;
 
       while (pos < buffer.length) {
-        // Look for <component or <relationship
         const nextComp = buffer.indexOf('<component', pos);
         const nextRel = buffer.indexOf('<relationship', pos);
 
@@ -257,12 +268,11 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           isComp = false;
         } else {
           lastUnparsedPos = pos;
-          break; // No more elements in this buffer chunk
+          break;
         }
 
         const openTagEnd = buffer.indexOf('>', targetPos);
         if (openTagEnd === -1) {
-          // Opening tag incomplete, wait for more stream chunks
           lastUnparsedPos = targetPos;
           break;
         }
@@ -277,7 +287,6 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           const closeTag = isComp ? '</component>' : '</relationship>';
           const endTagPos = buffer.indexOf(closeTag, openTagEnd);
           if (endTagPos === -1) {
-            // Closing tag not yet received in this chunk
             lastUnparsedPos = targetPos;
             break;
           }
@@ -290,6 +299,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
 
         if (isComp) {
           compCount++;
+          bufferedCount++;
           const openTag = elemXml.substring(0, elemXml.indexOf('>'));
           const attrs = parseXmlAttributes(openTag);
           const ctype = attrs['type'] || 'Component';
@@ -319,48 +329,58 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           }
 
           if (!isSelfClosing) {
-            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 12); // length of </component> is 12
-
-            const parentMatch = /<parentalias\s+([^>]*)\/?>/i.exec(body);
-            if (parentMatch) {
-              const pAttrs = parseXmlAttributes(parentMatch[1]);
-              if (pAttrs['alias']) row['parent_alias'] = pAttrs['alias'];
-            }
-
-            const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(body);
-            if (descMatch) {
-              row['description'] = decodeXmlEntities(descMatch[1].trim());
-            }
-
-            const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
-            if (locMatch) {
-              const lAttrs = parseXmlAttributes(locMatch[1]);
-              if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
-            }
-
-            const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
-            let propMatch;
-            while ((propMatch = propRegex.exec(body)) !== null) {
-              const pAttrStr = propMatch[1] || propMatch[3] || '';
-              const pAttrs = parseXmlAttributes(pAttrStr);
-              const pname = pAttrs['name'];
-              let pval = pAttrs['value'] || '';
-              if (!pval && propMatch[2]) {
-                const inner = propMatch[2].trim();
-                if (inner.includes('<listItem')) {
-                  const items: string[] = [];
-                  const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
-                  let itemMatch;
-                  while ((itemMatch = itemRegex.exec(inner)) !== null) {
-                    items.push(decodeXmlEntities(itemMatch[1].trim()));
-                  }
-                  pval = items.join(', ');
-                } else {
-                  pval = decodeXmlEntities(inner);
+            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 12);
+            if (body.includes('<')) {
+              if (body.includes('<parentalias')) {
+                const parentMatch = /<parentalias\s+([^>]*)\/?>/i.exec(body);
+                if (parentMatch) {
+                  const pAttrs = parseXmlAttributes(parentMatch[1]);
+                  if (pAttrs['alias']) row['parent_alias'] = pAttrs['alias'];
                 }
               }
-              if (pname) {
-                row[sanitizeIdentifier(pname)] = pval;
+
+              if (body.includes('<description>')) {
+                const dStart = body.indexOf('<description>') + 13;
+                const dEnd = body.indexOf('</description>', dStart);
+                if (dEnd !== -1) {
+                  row['description'] = decodeXmlEntities(body.substring(dStart, dEnd).trim());
+                }
+              }
+
+              if (body.includes('<locator')) {
+                const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
+                if (locMatch) {
+                  const lAttrs = parseXmlAttributes(locMatch[1]);
+                  if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
+                }
+              }
+
+              if (body.includes('<property')) {
+                const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+                let propMatch;
+                while ((propMatch = propRegex.exec(body)) !== null) {
+                  const pAttrStr = propMatch[1] || propMatch[3] || '';
+                  const pAttrs = parseXmlAttributes(pAttrStr);
+                  const pname = pAttrs['name'];
+                  let pval = pAttrs['value'] || '';
+                  if (!pval && propMatch[2]) {
+                    const inner = propMatch[2].trim();
+                    if (inner.includes('<listItem')) {
+                      const items: string[] = [];
+                      const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+                      let itemMatch;
+                      while ((itemMatch = itemRegex.exec(inner)) !== null) {
+                        items.push(decodeXmlEntities(itemMatch[1].trim()));
+                      }
+                      pval = items.join(', ');
+                    } else {
+                      pval = decodeXmlEntities(inner);
+                    }
+                  }
+                  if (pname) {
+                    row[sanitizeIdentifier(pname)] = pval;
+                  }
+                }
               }
             }
           }
@@ -368,12 +388,9 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           ensureCompTable(tableName, Object.keys(row));
           if (!compBuffers.has(tableName)) compBuffers.set(tableName, []);
           compBuffers.get(tableName)!.push(row);
-
-          if (compBuffers.get(tableName)!.length >= 2500) {
-            flushCompBuffer(tableName);
-          }
         } else {
           relCount++;
+          bufferedCount++;
           const openTag = elemXml.substring(0, elemXml.indexOf('>'));
           const attrs = parseXmlAttributes(openTag);
           const rtype = attrs['type'] || 'Relationship';
@@ -393,54 +410,66 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           }
 
           if (!isSelfClosing) {
-            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 15); // length of </relationship> is 15
+            const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 15);
+            if (body.includes('<')) {
+              const c1Idx = body.indexOf('<comp1alias');
+              if (c1Idx !== -1) {
+                const c1End = body.indexOf('>', c1Idx);
+                const c1Tag = body.substring(c1Idx, c1End + 1);
+                const c1Attrs = parseXmlAttributes(c1Tag);
+                if (c1Attrs['alias']) row['comp1_alias'] = c1Attrs['alias'];
+              }
 
-            const c1Match = /<comp1alias\s+([^>]*)\/?>/i.exec(body);
-            if (c1Match) {
-              const c1Attrs = parseXmlAttributes(c1Match[1]);
-              if (c1Attrs['alias']) row['comp1_alias'] = c1Attrs['alias'];
-            }
+              const c2Idx = body.indexOf('<comp2alias');
+              if (c2Idx !== -1) {
+                const c2End = body.indexOf('>', c2Idx);
+                const c2Tag = body.substring(c2Idx, c2End + 1);
+                const c2Attrs = parseXmlAttributes(c2Tag);
+                if (c2Attrs['alias']) row['comp2_alias'] = c2Attrs['alias'];
+              }
 
-            const c2Match = /<comp2alias\s+([^>]*)\/?>/i.exec(body);
-            if (c2Match) {
-              const c2Attrs = parseXmlAttributes(c2Match[1]);
-              if (c2Attrs['alias']) row['comp2_alias'] = c2Attrs['alias'];
-            }
-
-            const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(body);
-            if (descMatch) {
-              row['description'] = decodeXmlEntities(descMatch[1].trim());
-            }
-
-            const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
-            if (locMatch) {
-              const lAttrs = parseXmlAttributes(locMatch[1]);
-              if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
-            }
-
-            const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
-            let propMatch;
-            while ((propMatch = propRegex.exec(body)) !== null) {
-              const pAttrStr = propMatch[1] || propMatch[3] || '';
-              const pAttrs = parseXmlAttributes(pAttrStr);
-              const pname = pAttrs['name'];
-              let pval = pAttrs['value'] || '';
-              if (!pval && propMatch[2]) {
-                const inner = propMatch[2].trim();
-                if (inner.includes('<listItem')) {
-                  const items: string[] = [];
-                  const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
-                  let itemMatch;
-                  while ((itemMatch = itemRegex.exec(inner)) !== null) {
-                    items.push(decodeXmlEntities(itemMatch[1].trim()));
-                  }
-                  pval = items.join(', ');
-                } else {
-                  pval = decodeXmlEntities(inner);
+              if (body.includes('<description>')) {
+                const dStart = body.indexOf('<description>') + 13;
+                const dEnd = body.indexOf('</description>', dStart);
+                if (dEnd !== -1) {
+                  row['description'] = decodeXmlEntities(body.substring(dStart, dEnd).trim());
                 }
               }
-              if (pname) {
-                row[sanitizeIdentifier(pname)] = pval;
+
+              if (body.includes('<locator')) {
+                const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
+                if (locMatch) {
+                  const lAttrs = parseXmlAttributes(locMatch[1]);
+                  if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
+                }
+              }
+
+              if (body.includes('<property')) {
+                const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+                let propMatch;
+                while ((propMatch = propRegex.exec(body)) !== null) {
+                  const pAttrStr = propMatch[1] || propMatch[3] || '';
+                  const pAttrs = parseXmlAttributes(pAttrStr);
+                  const pname = pAttrs['name'];
+                  let pval = pAttrs['value'] || '';
+                  if (!pval && propMatch[2]) {
+                    const inner = propMatch[2].trim();
+                    if (inner.includes('<listItem')) {
+                      const items: string[] = [];
+                      const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+                      let itemMatch;
+                      while ((itemMatch = itemRegex.exec(inner)) !== null) {
+                        items.push(decodeXmlEntities(itemMatch[1].trim()));
+                      }
+                      pval = items.join(', ');
+                    } else {
+                      pval = decodeXmlEntities(inner);
+                    }
+                  }
+                  if (pname) {
+                    row[sanitizeIdentifier(pname)] = pval;
+                  }
+                }
               }
             }
           }
@@ -448,17 +477,17 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           ensureRelTable(tableName, Object.keys(row));
           if (!relBuffers.has(tableName)) relBuffers.set(tableName, []);
           relBuffers.get(tableName)!.push(row);
+        }
 
-          if (relBuffers.get(tableName)!.length >= 2500) {
-            flushRelBuffer(tableName);
-          }
+        if (bufferedCount >= 15000) {
+          flushAllBuffers();
         }
       }
 
       buffer = buffer.substring(lastUnparsedPos);
 
       const now = performance.now();
-      if (now - lastReport > 150 || (compCount + relCount) % 2500 === 0) {
+      if (now - lastReport > 150 || (compCount + relCount) % 5000 === 0) {
         const pct = Math.min(95, Math.max(5, Math.round((bytesProcessed / totalBytes) * 95)));
         self.postMessage({
           type: 'PROGRESS',
@@ -476,12 +505,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     }
 
     // Flush all remaining buffers
-    for (const [tbl] of compBuffers) {
-      flushCompBuffer(tbl);
-    }
-    for (const [tbl] of relBuffers) {
-      flushRelBuffer(tbl);
-    }
+    flushAllBuffers();
 
     // Generate Indexes
     self.postMessage({
@@ -514,18 +538,22 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     }
 
     const elapsed = (performance.now() - startTime) / 1000;
+    const elapsedSeconds = Math.round(elapsed * 10) / 10;
+    const sizeMb = Math.round((file.size / (1024 * 1024)) * 10) / 10;
     const payloadId = filename.replace(/\.[^/.]+$/, '').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
 
     currentPayloadInfo = {
       id: payloadId,
       filename,
       size_bytes: file.size,
-      size_mb: Math.round((file.size / (1024 * 1024)) * 10) / 10,
+      size_mb: sizeMb,
       total_components: compCount,
       total_relationships: relCount,
       total_tables: tableColumns.size,
       last_modified: Date.now() / 1000,
       status: 'ready',
+      elapsed_seconds: elapsedSeconds,
+      conversion_time_seconds: elapsedSeconds,
     };
 
     const typesData = getPayloadTypesSync(database);
@@ -539,7 +567,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
       relationships_ingested: relCount,
       bytes_processed: totalBytes,
       total_bytes: totalBytes,
-      elapsed_seconds: Math.round(elapsed * 10) / 10,
+      elapsed_seconds: elapsedSeconds,
     } as WorkerProgressMessage);
 
     self.postMessage({

@@ -21,7 +21,7 @@ export async function uploadTuxFile(file: File, _datasetName?: string): Promise<
 
 export async function uploadTuxFileWithProgress(
   file: File,
-  _datasetName: string | undefined,
+  datasetName: string | undefined,
   onProgress: (progress: UploadProgressInfo) => void
 ): Promise<any> {
   const result = await clientDb.uploadTuxPayload(file, file.name, (p) => {
@@ -43,13 +43,22 @@ export async function uploadTuxFileWithProgress(
     });
   });
 
+  const payloadInfo = result.payload_info;
+  const sizeMb = payloadInfo.size_mb ?? Math.round((file.size / (1024 * 1024)) * 10) / 10;
+  const elapsedSec = (payloadInfo as any).elapsed_seconds ?? (payloadInfo as any).conversion_time_seconds ?? 1;
+  const datasetLabel = datasetName?.trim() || payloadInfo.filename.replace(/\.xml$/i, '') || payloadInfo.id;
+
   return {
     status: 'success',
-    payload_id: result.payload_info.id,
-    components_ingested: result.payload_info.total_components,
-    relationships_ingested: result.payload_info.total_relationships,
-    conversion_time_seconds: (result.payload_info as any).elapsed_seconds || 1,
-    table_count: result.payload_info.total_tables,
+    id: payloadInfo.id,
+    payload_id: payloadInfo.id,
+    dataset_name: datasetLabel,
+    filename: payloadInfo.filename,
+    size_mb: sizeMb,
+    components_ingested: payloadInfo.total_components,
+    relationships_ingested: payloadInfo.total_relationships,
+    conversion_time_seconds: elapsedSec,
+    table_count: payloadInfo.total_tables,
   };
 }
 

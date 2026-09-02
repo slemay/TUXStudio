@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Upload, FileCode, CheckCircle, AlertCircle, Layers, Network, Database, ArrowRight, Clock, HardDrive, Keyboard } from 'lucide-react';
+import { X, Upload, FileCode, CheckCircle, AlertCircle, Layers, Network, ArrowRight, Clock, HardDrive, Keyboard } from 'lucide-react';
 import { uploadTuxFileWithProgress } from '../api';
 import type { UploadProgressInfo } from '../types';
 
@@ -243,7 +243,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpl
                 <div>
                   <h4 className="text-sm font-bold text-slate-900 dark:text-white">Import Successfully Completed!</h4>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Dataset <span className="text-emerald-600 dark:text-emerald-400 font-semibold font-mono">"{uploadResult.dataset_name || uploadResult.id}"</span> ({Number(uploadResult.components_ingested ?? progressInfo?.components_ingested ?? 0).toLocaleString()} components, {Number(uploadResult.relationships_ingested ?? progressInfo?.relationships_ingested ?? 0).toLocaleString()} relationships)
+                    Dataset <span className="text-emerald-600 dark:text-emerald-400 font-semibold font-mono">"{uploadResult.dataset_name || uploadResult.filename || uploadResult.id || 'Troux XML'}"</span> ({Number(uploadResult.components_ingested ?? progressInfo?.components_ingested ?? 0).toLocaleString()} components, {Number(uploadResult.relationships_ingested ?? progressInfo?.relationships_ingested ?? 0).toLocaleString()} relationships)
                   </p>
                 </div>
               </div>
@@ -276,7 +276,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpl
                     <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-500 dark:text-slate-400">Payload Size</span>
                   </div>
                   <span className="text-base font-extrabold text-slate-900 dark:text-white font-mono">
-                    {uploadResult.size_mb} MB
+                    {uploadResult.size_mb ?? (file ? Math.round((file.size / (1024 * 1024)) * 10) / 10 : '—')} MB
                   </span>
                 </div>
 
@@ -286,18 +286,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpl
                     <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-500 dark:text-slate-400">Conversion Time</span>
                   </div>
                   <span className="text-base font-extrabold text-slate-900 dark:text-white font-mono">
-                    {uploadResult.conversion_time_seconds}s
+                    {uploadResult.conversion_time_seconds ?? (progressInfo?.conversion_time_seconds || 1)}s
                   </span>
                 </div>
-              </div>
-
-              {/* Database Reference */}
-              <div className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800/80 flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-                  <Database className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                  <span>SQLite Database:</span>
-                </div>
-                <span className="font-mono text-slate-800 dark:text-slate-200 font-semibold">{uploadResult.id}.db</span>
               </div>
 
               {/* Keyboard Prompt Hint */}
