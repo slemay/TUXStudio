@@ -147,7 +147,7 @@ export function App() {
       setIsLoading(true);
       const res = await fetchPayloadTypes(activePayloadId);
       setTypesData(res);
-      // Select first component table if activeTable is invalid or unset
+      // Select first component or relationship table if activeTable is invalid or unset
       const allTables = [
         ...res.component_types.map((c) => c.table_name),
         ...res.relationship_types.map((r) => r.table_name),
@@ -155,6 +155,10 @@ export function App() {
       if (!activeTable || !allTables.includes(activeTable)) {
         if (res.component_types.length > 0) {
           const defaultTbl = res.component_types[0].table_name;
+          setActiveTable(defaultTbl);
+          localStorage.setItem('tuxdb_active_table', defaultTbl);
+        } else if (res.relationship_types.length > 0) {
+          const defaultTbl = res.relationship_types[0].table_name;
           setActiveTable(defaultTbl);
           localStorage.setItem('tuxdb_active_table', defaultTbl);
         }
@@ -171,6 +175,44 @@ export function App() {
   }, [loadTypes]);
 
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleUploadSuccess = useCallback(async (newId?: string) => {
+    setIsLoading(true);
+    try {
+      const list = await fetchPayloads();
+      setPayloads(list);
+      const targetId = newId || (list.length > 0 ? list[0].id : '');
+      if (targetId) {
+        setActivePayloadId(targetId);
+        localStorage.setItem('tuxdb_active_payload', targetId);
+        const res = await fetchPayloadTypes(targetId);
+        setTypesData(res);
+        if (res.component_types.length > 0) {
+          const firstTbl = res.component_types[0].table_name;
+          setActiveTable(firstTbl);
+          localStorage.setItem('tuxdb_active_table', firstTbl);
+        } else if (res.relationship_types.length > 0) {
+          const firstTbl = res.relationship_types[0].table_name;
+          setActiveTable(firstTbl);
+          localStorage.setItem('tuxdb_active_table', firstTbl);
+        }
+      }
+      setSelectedAlias(null);
+      setEntityDetail(null);
+      setBreadcrumbStack([]);
+      setPage(1);
+      setSearchQuery('');
+      setSortBy(undefined);
+      setActiveView('table');
+      localStorage.setItem('tuxdb_active_view', 'table');
+      setRefreshKey((k) => k + 1);
+    } catch (err) {
+      console.error('Failed to complete upload processing:', err);
+    } finally {
+      setIsLoading(false);
+      setIsUploadOpen(false);
+    }
+  }, []);
 
   // 3. Load Table Data with race condition prevention and request cancellation
   useEffect(() => {
@@ -389,13 +431,7 @@ export function App() {
         {/* Center Main Content Area (Independent Right Pane) */}
         <main className="flex-1 flex flex-col overflow-hidden min-w-0 min-h-0 relative">
           {!activePayloadId || payloads.length === 0 ? (
-            <EmptyUploadState
-              onUploadSuccess={(newId) => {
-                loadPayloads();
-                handleSelectPayload(newId);
-                handleChangeView('table');
-              }}
-            />
+            <EmptyUploadState onUploadSuccess={handleUploadSuccess} />
           ) : (
             <>
               {activeView === 'table' && (
@@ -464,11 +500,7 @@ export function App() {
       <UploadModal
         isOpen={isUploadOpen}
         onClose={() => setIsUploadOpen(false)}
-        onUploadSuccess={(newId) => {
-          loadPayloads();
-          handleSelectPayload(newId);
-          handleChangeView('table');
-        }}
+        onUploadSuccess={handleUploadSuccess}
       />
     </div>
   );

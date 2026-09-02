@@ -649,6 +649,7 @@ function getPayloadTypesSync(dbInstance: Database) {
   relTypes.sort((a, b) => b.count - a.count);
 
   return {
+    payload_id: currentPayloadInfo?.id || '',
     component_types: compTypes,
     relationship_types: relTypes,
     total_components: totalComp,
