@@ -106,7 +106,7 @@ For detailed technical design specifications, see [DESIGN.md](DESIGN.md).
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-org/TUXStudio.git
+git clone https://github.com/slemay/TUXStudio.git
 cd TUXStudio
 ```
 
@@ -148,7 +148,7 @@ TUX Studio contains an automated GitHub Actions deployment workflow in [`.github
 3. Under **Build and deployment** → **Source**, select **GitHub Actions**.
 4. The deployment pipeline will automatically build and publish your instance to:
    ```
-   https://<username>.github.io/<repository-name>/
+   https://slemay.github.io/TUXStudio/
    ```
 
 ---
