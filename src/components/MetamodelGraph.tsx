@@ -591,7 +591,7 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
               const loopY2 = sPos.y - sHeight / 2;
 
               const relText = edge.uml_name || `${edge.label || 'supervises'} ►`;
-              const relBoxWidth = Math.max(180, Math.ceil(relText.length * 7.5 + 40));
+              const relBoxWidth = Math.max(220, Math.ceil(relText.length * 8.5 + 48));
               const halfRelBoxWidth = relBoxWidth / 2;
 
               return (
@@ -611,14 +611,19 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                       width={relBoxWidth}
                       height="48"
                       rx="8"
-                      className="fill-white dark:fill-slate-950 stroke-emerald-500 dark:stroke-emerald-400 group-hover/rel:stroke-emerald-300 dark:group-hover/rel:stroke-emerald-300 group-hover/rel:fill-slate-50 dark:group-hover/rel:fill-slate-900 shadow-xl transition"
-                      strokeWidth="1.5"
+                      fill="#0b1120"
+                      stroke="#10b981"
+                      strokeWidth="2"
+                      className="group-hover/rel:stroke-emerald-300 group-hover/rel:fill-slate-900 shadow-xl transition"
                     />
                     <text
                       x="0"
                       y="-10"
                       textAnchor="middle"
-                      className="fill-emerald-600 dark:fill-emerald-400 font-semibold italic text-[9.5px]"
+                      fill="#10b981"
+                      fontSize="9.5"
+                      fontWeight="600"
+                      fontStyle="italic"
                       fontFamily="sans-serif"
                     >
                       «Relationship»
@@ -627,7 +632,9 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                       x="0"
                       y="5"
                       textAnchor="middle"
-                      className="fill-slate-900 dark:fill-white font-bold text-[11px]"
+                      fill="#f8fafc"
+                      fontSize="11"
+                      fontWeight="bold"
                       fontFamily="sans-serif"
                     >
                       {relText}
@@ -636,7 +643,10 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                       x="0"
                       y="18"
                       textAnchor="middle"
-                      className="fill-indigo-600 dark:fill-indigo-400 font-mono font-bold text-[9.5px]"
+                      fill="#a5b4fc"
+                      fontSize="9.5"
+                      fontWeight="bold"
+                      fontFamily="monospace"
                     >
                       {`{count = ${edge.count?.toLocaleString() ?? 0}}`}
                     </text>
@@ -702,7 +712,7 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
             const tgtLabelY = tgtBorder.y - uy * 32 + ny * 16;
 
             const relText = edge.uml_name || `${edge.label} ►`;
-            const relBoxWidth = Math.max(180, Math.ceil(relText.length * 7.5 + 40));
+            const relBoxWidth = Math.max(220, Math.ceil(relText.length * 8.5 + 48));
             const halfRelBoxWidth = relBoxWidth / 2;
 
             return (
@@ -722,14 +732,19 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                     width={relBoxWidth}
                     height="48"
                     rx="8"
-                    className="fill-white dark:fill-slate-950 stroke-emerald-500 dark:stroke-emerald-400 group-hover/rel:stroke-emerald-300 dark:group-hover/rel:stroke-emerald-300 group-hover/rel:fill-slate-50 dark:group-hover/rel:fill-slate-900 shadow-xl transition"
-                    strokeWidth="1.5"
+                    fill="#0b1120"
+                    stroke="#10b981"
+                    strokeWidth="2"
+                    className="group-hover/rel:stroke-emerald-300 group-hover/rel:fill-slate-900 shadow-xl transition"
                   />
                   <text
                     x="0"
                     y="-10"
                     textAnchor="middle"
-                    className="fill-emerald-600 dark:fill-emerald-400 font-semibold italic text-[9.5px]"
+                    fill="#10b981"
+                    fontSize="9.5"
+                    fontWeight="600"
+                    fontStyle="italic"
                     fontFamily="sans-serif"
                   >
                     «Relationship»
@@ -738,7 +753,9 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                     x="0"
                     y="5"
                     textAnchor="middle"
-                    className="fill-slate-900 dark:fill-white font-bold text-[11px]"
+                    fill="#f8fafc"
+                    fontSize="11"
+                    fontWeight="bold"
                     fontFamily="sans-serif"
                   >
                     {relText}
@@ -747,7 +764,10 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                     x="0"
                     y="18"
                     textAnchor="middle"
-                    className="fill-indigo-600 dark:fill-indigo-400 font-mono font-bold text-[9.5px]"
+                    fill="#a5b4fc"
+                    fontSize="9.5"
+                    fontWeight="bold"
+                    fontFamily="monospace"
                   >
                     {`{count = ${edge.count?.toLocaleString() ?? 0}}`}
                   </text>
