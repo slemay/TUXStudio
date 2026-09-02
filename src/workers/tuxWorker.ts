@@ -64,13 +64,17 @@ function decodeXmlEntities(str: string): string {
     .replace(/&apos;/g, "'");
 }
 
+const ATTR_REGEX = /([a-zA-Z0-9_:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+const PROP_REGEX = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+const ITEM_REGEX = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+
 function parseXmlAttributes(attrStr: string): Record<string, string> {
   const attrs: Record<string, string> = {};
-  const regex = /([a-zA-Z0-9_:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  ATTR_REGEX.lastIndex = 0;
   let match;
-  while ((match = regex.exec(attrStr)) !== null) {
+  while ((match = ATTR_REGEX.exec(attrStr)) !== null) {
     const rawVal = match[2] !== undefined ? match[2] : match[3];
-    attrs[match[1]] = rawVal.includes('&') ? decodeXmlEntities(rawVal) : rawVal;
+    attrs[match[1]] = rawVal && rawVal.includes('&') ? decodeXmlEntities(rawVal) : (rawVal || '');
   }
   return attrs;
 }
@@ -253,14 +257,14 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     const relBuffers = new Map<string, Array<Record<string, string>>>();
     const seenAliases = new Set<string>();
 
-    const ensureCompTable = (tableName: string, rowCols: string[]) => {
-      if (!tableColumns.has(tableName)) {
+    const ensureCompTable = (tableName: string, row: Record<string, string>) => {
+      let colsSet = tableColumns.get(tableName);
+      if (!colsSet) {
         database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" ("alias" TEXT PRIMARY KEY, "name" TEXT, "type" TEXT);`);
-        tableColumns.set(tableName, new Set(['alias', 'name', 'type']));
+        colsSet = new Set(['alias', 'name', 'type']);
+        tableColumns.set(tableName, colsSet);
       }
-      const colsSet = tableColumns.get(tableName)!;
-      for (let i = 0; i < rowCols.length; i++) {
-        const c = rowCols[i];
+      for (const c in row) {
         if (!colsSet.has(c)) {
           try {
             database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
@@ -272,14 +276,14 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
       }
     };
 
-    const ensureRelTable = (tableName: string, rowCols: string[]) => {
-      if (!tableColumns.has(tableName)) {
+    const ensureRelTable = (tableName: string, row: Record<string, string>) => {
+      let colsSet = tableColumns.get(tableName);
+      if (!colsSet) {
         database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "type" TEXT, "comp1_alias" TEXT, "comp2_alias" TEXT);`);
-        tableColumns.set(tableName, new Set(['id', 'type', 'comp1_alias', 'comp2_alias']));
+        colsSet = new Set(['id', 'type', 'comp1_alias', 'comp2_alias']);
+        tableColumns.set(tableName, colsSet);
       }
-      const colsSet = tableColumns.get(tableName)!;
-      for (let i = 0; i < rowCols.length; i++) {
-        const c = rowCols[i];
+      for (const c in row) {
         if (!colsSet.has(c)) {
           try {
             database.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c}" TEXT;`);
@@ -299,19 +303,28 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           if (buffer.length === 0) continue;
           const colsSet = tableColumns.get(tbl)!;
           const cols = Array.from(colsSet);
-          const placeholders = cols.map(() => '?').join(', ');
           const colSql = cols.map((c) => `"${c}"`).join(', ');
-          const sql = `INSERT OR REPLACE INTO "${tbl}" (${colSql}) VALUES (${placeholders})`;
+          const rowPlaceholder = `(${cols.map(() => '?').join(',')})`;
+          const maxRowsPerBatch = Math.max(1, Math.min(300, Math.floor(900 / Math.max(1, cols.length))));
 
-          const stmt = database.prepare(sql);
-          try {
-            for (let i = 0; i < buffer.length; i++) {
-              const row = buffer[i];
-              const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
-              stmt.run(values);
+          for (let start = 0; start < buffer.length; start += maxRowsPerBatch) {
+            const batch = buffer.slice(start, start + maxRowsPerBatch);
+            const placeholders = batch.map(() => rowPlaceholder).join(',');
+            const sql = `INSERT OR REPLACE INTO "${tbl}" (${colSql}) VALUES ${placeholders};`;
+            const flatValues: string[] = [];
+            for (let i = 0; i < batch.length; i++) {
+              const row = batch[i];
+              for (let j = 0; j < cols.length; j++) {
+                const c = cols[j];
+                flatValues.push(row[c] !== undefined ? row[c] : '');
+              }
             }
-          } finally {
-            stmt.free();
+            const stmt = database.prepare(sql);
+            try {
+              stmt.run(flatValues);
+            } finally {
+              stmt.free();
+            }
           }
           buffer.length = 0;
         }
@@ -320,19 +333,28 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
           if (buffer.length === 0) continue;
           const colsSet = tableColumns.get(tbl)!;
           const cols = Array.from(colsSet).filter((c) => c !== 'id');
-          const placeholders = cols.map(() => '?').join(', ');
           const colSql = cols.map((c) => `"${c}"`).join(', ');
-          const sql = `INSERT INTO "${tbl}" (${colSql}) VALUES (${placeholders})`;
+          const rowPlaceholder = `(${cols.map(() => '?').join(',')})`;
+          const maxRowsPerBatch = Math.max(1, Math.min(300, Math.floor(900 / Math.max(1, cols.length))));
 
-          const stmt = database.prepare(sql);
-          try {
-            for (let i = 0; i < buffer.length; i++) {
-              const row = buffer[i];
-              const values = cols.map((c) => (row[c] !== undefined ? row[c] : ''));
-              stmt.run(values);
+          for (let start = 0; start < buffer.length; start += maxRowsPerBatch) {
+            const batch = buffer.slice(start, start + maxRowsPerBatch);
+            const placeholders = batch.map(() => rowPlaceholder).join(',');
+            const sql = `INSERT INTO "${tbl}" (${colSql}) VALUES ${placeholders};`;
+            const flatValues: string[] = [];
+            for (let i = 0; i < batch.length; i++) {
+              const row = batch[i];
+              for (let j = 0; j < cols.length; j++) {
+                const c = cols[j];
+                flatValues.push(row[c] !== undefined ? row[c] : '');
+              }
             }
-          } finally {
-            stmt.free();
+            const stmt = database.prepare(sql);
+            try {
+              stmt.run(flatValues);
+            } finally {
+              stmt.free();
+            }
           }
           buffer.length = 0;
         }
@@ -461,9 +483,10 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
             const body = elemXml.substring(openTagEnd - targetPos + 1, elemXml.length - 12);
             if (body.includes('<')) {
               if (body.includes('<parentalias')) {
-                const parentMatch = /<parentalias\s+([^>]*)\/?>/i.exec(body);
-                if (parentMatch) {
-                  const pAttrs = parseXmlAttributes(parentMatch[1]);
+                const pIdx = body.indexOf('<parentalias');
+                const pEnd = body.indexOf('>', pIdx);
+                if (pEnd !== -1) {
+                  const pAttrs = parseXmlAttributes(body.substring(pIdx, pEnd + 1));
                   if (pAttrs['alias']) row['parent_alias'] = pAttrs['alias'];
                 }
               }
@@ -477,17 +500,18 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
               }
 
               if (body.includes('<locator')) {
-                const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
-                if (locMatch) {
-                  const lAttrs = parseXmlAttributes(locMatch[1]);
+                const lIdx = body.indexOf('<locator');
+                const lEnd = body.indexOf('>', lIdx);
+                if (lEnd !== -1) {
+                  const lAttrs = parseXmlAttributes(body.substring(lIdx, lEnd + 1));
                   if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
                 }
               }
 
               if (body.includes('<property')) {
-                const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+                PROP_REGEX.lastIndex = 0;
                 let propMatch;
-                while ((propMatch = propRegex.exec(body)) !== null) {
+                while ((propMatch = PROP_REGEX.exec(body)) !== null) {
                   const pAttrStr = propMatch[1] || propMatch[3] || '';
                   const pAttrs = parseXmlAttributes(pAttrStr);
                   const pname = pAttrs['name'];
@@ -496,9 +520,9 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
                     const inner = propMatch[2].trim();
                     if (inner.includes('<listItem')) {
                       const items: string[] = [];
-                      const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+                      ITEM_REGEX.lastIndex = 0;
                       let itemMatch;
-                      while ((itemMatch = itemRegex.exec(inner)) !== null) {
+                      while ((itemMatch = ITEM_REGEX.exec(inner)) !== null) {
                         items.push(decodeXmlEntities(itemMatch[1].trim()));
                       }
                       pval = items.join(', ');
@@ -514,7 +538,7 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
             }
           }
 
-          ensureCompTable(tableName, Object.keys(row));
+          ensureCompTable(tableName, row);
           if (!compBuffers.has(tableName)) compBuffers.set(tableName, []);
           compBuffers.get(tableName)!.push(row);
         } else {
@@ -566,17 +590,18 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
               }
 
               if (body.includes('<locator')) {
-                const locMatch = /<locator\s+([^>]*)\/?>/i.exec(body);
-                if (locMatch) {
-                  const lAttrs = parseXmlAttributes(locMatch[1]);
+                const lIdx = body.indexOf('<locator');
+                const lEnd = body.indexOf('>', lIdx);
+                if (lEnd !== -1) {
+                  const lAttrs = parseXmlAttributes(body.substring(lIdx, lEnd + 1));
                   if (lAttrs['class']) row['locator_class'] = lAttrs['class'];
                 }
               }
 
               if (body.includes('<property')) {
-                const propRegex = /<property\s+([^>]*)>([\s\S]*?)<\/property>|<property\s+([^>]*)\/>/gi;
+                PROP_REGEX.lastIndex = 0;
                 let propMatch;
-                while ((propMatch = propRegex.exec(body)) !== null) {
+                while ((propMatch = PROP_REGEX.exec(body)) !== null) {
                   const pAttrStr = propMatch[1] || propMatch[3] || '';
                   const pAttrs = parseXmlAttributes(pAttrStr);
                   const pname = pAttrs['name'];
@@ -585,9 +610,9 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
                     const inner = propMatch[2].trim();
                     if (inner.includes('<listItem')) {
                       const items: string[] = [];
-                      const itemRegex = /<listItem[^>]*>([\s\S]*?)<\/listItem>/gi;
+                      ITEM_REGEX.lastIndex = 0;
                       let itemMatch;
-                      while ((itemMatch = itemRegex.exec(inner)) !== null) {
+                      while ((itemMatch = ITEM_REGEX.exec(inner)) !== null) {
                         items.push(decodeXmlEntities(itemMatch[1].trim()));
                       }
                       pval = items.join(', ');
@@ -603,12 +628,12 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
             }
           }
 
-          ensureRelTable(tableName, Object.keys(row));
+          ensureRelTable(tableName, row);
           if (!relBuffers.has(tableName)) relBuffers.set(tableName, []);
           relBuffers.get(tableName)!.push(row);
         }
 
-        if (bufferedCount >= 15000) {
+        if (bufferedCount >= 20000) {
           flushAllBuffers();
         }
       }
