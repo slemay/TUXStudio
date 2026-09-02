@@ -377,7 +377,7 @@ export function App() {
       setPayloads(remaining);
       if (remaining.length > 0) {
         const nextId = remaining[0].id;
-        handleSelectPayload(nextId);
+        await handleSelectPayload(nextId);
       } else {
         setActivePayloadId('');
         setActiveTable('');
@@ -389,6 +389,7 @@ export function App() {
         setBreadcrumbStack([]);
         localStorage.removeItem('tuxdb_active_payload');
         localStorage.removeItem('tuxdb_active_table');
+        setRefreshKey((k) => k + 1);
       }
     } catch (err) {
       console.error('Failed to clear dataset:', err);

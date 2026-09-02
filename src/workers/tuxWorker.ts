@@ -168,16 +168,13 @@ async function listAllPayloadsFromIndexedDb(): Promise<PayloadInfo[]> {
           }
           cursor.continue();
         } else {
-          if (currentPayloadInfo && !results.some((p) => p.id === currentPayloadInfo?.id)) {
-            results.unshift(currentPayloadInfo);
-          }
           resolve(results);
         }
       };
-      req.onerror = () => resolve(currentPayloadInfo ? [currentPayloadInfo] : []);
+      req.onerror = () => resolve([]);
     });
   } catch {
-    return currentPayloadInfo ? [currentPayloadInfo] : [];
+    return [];
   }
 }
 
@@ -214,7 +211,7 @@ async function switchPayloadInIndexedDb(targetPayloadId: string): Promise<{ payl
 async function clearDatabaseFromIndexedDb(payloadId?: string): Promise<void> {
   try {
     const idb = await openIndexedDb();
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = idb.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       if (payloadId) {
@@ -222,10 +219,27 @@ async function clearDatabaseFromIndexedDb(payloadId?: string): Promise<void> {
       } else {
         store.clear();
       }
-      store.delete('__active_payload_id__');
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
+
+    if (!payloadId || currentPayloadInfo?.id === payloadId) {
+      currentPayloadInfo = null;
+      if (db) {
+        try {
+          const existing = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
+          if (existing.length > 0 && existing[0].values) {
+            for (const row of existing[0].values) {
+              db.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
+            }
+          }
+        } catch (_) {}
+      }
+      db = null;
+      tableColumns.clear();
+      compTableMap.clear();
+      relTableMap.clear();
+    }
   } catch (err) {
     console.warn('Failed to clear database from IndexedDB:', err);
   }
