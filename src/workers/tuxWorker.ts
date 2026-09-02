@@ -1,6 +1,7 @@
 import initSqlJs, { type Database } from 'sql.js';
 import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import JSZip from 'jszip';
+import type { PayloadInfo } from '../types';
 
 // =====================================================================
 // Type Definitions & Helpers
@@ -151,6 +152,65 @@ async function loadDatabaseFromIndexedDb(): Promise<{ payloadId: string; payload
   }
 }
 
+async function listAllPayloadsFromIndexedDb(): Promise<PayloadInfo[]> {
+  try {
+    const idb = await openIndexedDb();
+    return new Promise((resolve) => {
+      const tx = idb.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.openCursor();
+      const results: PayloadInfo[] = [];
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          if (cursor.key !== '__active_payload_id__' && cursor.value?.payloadInfo) {
+            results.push(cursor.value.payloadInfo);
+          }
+          cursor.continue();
+        } else {
+          if (currentPayloadInfo && !results.some((p) => p.id === currentPayloadInfo?.id)) {
+            results.unshift(currentPayloadInfo);
+          }
+          resolve(results);
+        }
+      };
+      req.onerror = () => resolve(currentPayloadInfo ? [currentPayloadInfo] : []);
+    });
+  } catch {
+    return currentPayloadInfo ? [currentPayloadInfo] : [];
+  }
+}
+
+async function switchPayloadInIndexedDb(targetPayloadId: string): Promise<{ payloadInfo: any; typesData: any } | null> {
+  try {
+    const idb = await openIndexedDb();
+    return new Promise((resolve, reject) => {
+      const tx = idb.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const dataReq = store.get(targetPayloadId);
+      dataReq.onsuccess = async () => {
+        const record = dataReq.result;
+        if (!record || !record.binaryData) {
+          resolve(null);
+          return;
+        }
+        store.put(targetPayloadId, '__active_payload_id__');
+        const SQL = await initSqlJs({ locateFile: () => sqlWasmUrl });
+        db = new SQL.Database(record.binaryData);
+        db.exec('PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -64000;');
+        currentPayloadInfo = record.payloadInfo;
+        rebuildTableMetadata(db);
+        const typesData = getPayloadTypesSync(db);
+        resolve({ payloadInfo: currentPayloadInfo, typesData });
+      };
+      dataReq.onerror = () => reject(dataReq.error);
+    });
+  } catch (err) {
+    console.error('Failed to switch payload:', err);
+    return null;
+  }
+}
+
 async function clearDatabaseFromIndexedDb(payloadId?: string): Promise<void> {
   try {
     const idb = await openIndexedDb();
@@ -226,7 +286,7 @@ async function getOrInitDb(): Promise<Database> {
 // Streaming Ingestion Engine
 // =====================================================================
 
-async function ingestTuxFile(file: File | Blob, filename: string) {
+async function ingestTuxFile(file: File | Blob, filename: string, customDatasetName?: string) {
   const startTime = performance.now();
   tableColumns.clear();
   compTableMap.clear();
@@ -234,18 +294,10 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
   sanitizeMap.clear();
 
   try {
-    const database = await getOrInitDb();
-    // Clear any existing tables
-    try {
-      const existing = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
-      if (existing.length > 0 && existing[0].values) {
-        for (const row of existing[0].values) {
-          database.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
-        }
-      }
-    } catch (e) {
-      console.error('Error clearing database:', e);
-    }
+    const SQL = await initSqlJs({ locateFile: () => sqlWasmUrl });
+    const database = new SQL.Database();
+    database.exec('PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -64000;');
+    db = database;
 
     const totalBytes = file.size || 1;
     let compCount = 0;
@@ -709,11 +761,15 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     const elapsed = (performance.now() - startTime) / 1000;
     const elapsedSeconds = Math.round(elapsed * 10) / 10;
     const sizeMb = Math.round((file.size / (1024 * 1024)) * 10) / 10;
-    const payloadId = filename.replace(/\.[^/.]+$/, '').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+    const rawId = (customDatasetName && customDatasetName.trim())
+      ? customDatasetName.trim()
+      : filename.replace(/\.[^/.]+$/, '');
+    const payloadId = rawId.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || `dataset_${Date.now()}`;
 
     currentPayloadInfo = {
       id: payloadId,
       filename,
+      dataset_name: customDatasetName || rawId,
       size_bytes: file.size,
       size_mb: sizeMb,
       total_components: compCount,
@@ -1289,8 +1345,8 @@ self.onmessage = async (e: MessageEvent) => {
   try {
     switch (action) {
       case 'INGEST_FILE': {
-        const { file, filename } = payload;
-        const result = await ingestTuxFile(file, filename);
+        const { file, filename, customDatasetName } = payload;
+        const result = await ingestTuxFile(file, filename, customDatasetName);
         if (id !== undefined) {
           self.postMessage({ id, success: true, data: result });
         }
@@ -1299,29 +1355,45 @@ self.onmessage = async (e: MessageEvent) => {
 
       case 'GET_PAYLOADS': {
         await getOrInitDb();
-        const payloads = currentPayloadInfo ? [currentPayloadInfo] : [];
+        const payloads = await listAllPayloadsFromIndexedDb();
         self.postMessage({ id, success: true, data: { payloads } });
+        break;
+      }
+
+      case 'SWITCH_PAYLOAD': {
+        const { payloadId } = payload;
+        const switched = await switchPayloadInIndexedDb(payloadId);
+        if (switched) {
+          self.postMessage({ id, success: true, data: switched });
+        } else {
+          throw new Error(`Dataset '${payloadId}' not found in local storage.`);
+        }
         break;
       }
 
       case 'CLEAR_DATASET': {
         const { payloadId } = payload || {};
         await clearDatabaseFromIndexedDb(payloadId);
-        if (db) {
-          try {
-            const existing = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
-            if (existing.length > 0 && existing[0].values) {
-              for (const row of existing[0].values) {
-                db.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
+        const remaining = await listAllPayloadsFromIndexedDb();
+        if (remaining.length > 0) {
+          await switchPayloadInIndexedDb(remaining[0].id);
+        } else {
+          if (db) {
+            try {
+              const existing = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
+              if (existing.length > 0 && existing[0].values) {
+                for (const row of existing[0].values) {
+                  db.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
+                }
               }
-            }
-          } catch (_) {}
+            } catch (_) {}
+          }
+          currentPayloadInfo = null;
+          tableColumns.clear();
+          compTableMap.clear();
+          relTableMap.clear();
         }
-        currentPayloadInfo = null;
-        tableColumns.clear();
-        compTableMap.clear();
-        relTableMap.clear();
-        self.postMessage({ id, success: true, data: { cleared: true } });
+        self.postMessage({ id, success: true, data: { cleared: true, remaining } });
         break;
       }
 

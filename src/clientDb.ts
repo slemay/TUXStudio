@@ -54,6 +54,7 @@ function callWorker<T>(action: string, payload?: any): Promise<T> {
 export async function uploadTuxPayload(
   file: File | Blob,
   filename: string,
+  customDatasetName?: string,
   onProgress?: (progress: WorkerProgressMessage) => void
 ): Promise<{ payload_info: PayloadInfo; types_data: PayloadTypesResponse }> {
   let unsubscribe: (() => void) | null = null;
@@ -69,6 +70,7 @@ export async function uploadTuxPayload(
     return await callWorker<{ payload_info: PayloadInfo; types_data: PayloadTypesResponse }>('INGEST_FILE', {
       file,
       filename,
+      customDatasetName,
     });
   } finally {
     if (unsubscribe) {
@@ -79,6 +81,10 @@ export async function uploadTuxPayload(
 
 export async function fetchPayloads(): Promise<{ payloads: PayloadInfo[] }> {
   return callWorker<{ payloads: PayloadInfo[] }>('GET_PAYLOADS');
+}
+
+export async function switchPayload(payloadId: string): Promise<{ payload_info: PayloadInfo; types_data: PayloadTypesResponse }> {
+  return callWorker<{ payload_info: PayloadInfo; types_data: PayloadTypesResponse }>('SWITCH_PAYLOAD', { payloadId });
 }
 
 export async function fetchPayloadTypes(_payloadId: string): Promise<PayloadTypesResponse> {

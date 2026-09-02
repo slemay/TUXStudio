@@ -81,7 +81,7 @@ export const Header: React.FC<HeaderProps> = ({
                 >
                   {payloads.map((p) => (
                     <option key={p.id} value={p.id} className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200">
-                      {p.id} ({p.size_mb} MB)
+                      {p.dataset_name || p.id} ({p.size_mb} MB)
                     </option>
                   ))}
                 </select>

@@ -1,6 +1,7 @@
 export interface PayloadInfo {
   id: string;
   filename: string;
+  dataset_name?: string;
   size_bytes: number;
   size_mb: number;
   last_modified: number;
@@ -8,6 +9,8 @@ export interface PayloadInfo {
   total_components?: number;
   total_relationships?: number;
   total_tables?: number;
+  elapsed_seconds?: number;
+  conversion_time_seconds?: number;
 }
 
 export interface UploadProgressInfo {

@@ -6,6 +6,7 @@ import {
   fetchEntityDetail,
   fetchMetamodelGraph,
   clearDataset,
+  switchPayload,
 } from './api';
 import type {
   PayloadInfo,
@@ -334,13 +335,37 @@ export function App() {
     localStorage.setItem('tuxdb_active_view', view);
   };
 
-  const handleSelectPayload = (id: string) => {
-    setActivePayloadId(id);
-    localStorage.setItem('tuxdb_active_payload', id);
-    setSelectedAlias(null);
-    setEntityDetail(null);
-    setBreadcrumbStack([]);
-    setPage(1);
+  const handleSelectPayload = async (id: string) => {
+    if (!id) return;
+    try {
+      setIsLoading(true);
+      setActivePayloadId(id);
+      localStorage.setItem('tuxdb_active_payload', id);
+      const res = await switchPayload(id);
+      if (res && res.types_data) {
+        setTypesData(res.types_data);
+        if (res.types_data.component_types.length > 0) {
+          const firstTbl = res.types_data.component_types[0].table_name;
+          setActiveTable(firstTbl);
+          localStorage.setItem('tuxdb_active_table', firstTbl);
+        } else if (res.types_data.relationship_types.length > 0) {
+          const firstTbl = res.types_data.relationship_types[0].table_name;
+          setActiveTable(firstTbl);
+          localStorage.setItem('tuxdb_active_table', firstTbl);
+        }
+      }
+      setSelectedAlias(null);
+      setEntityDetail(null);
+      setBreadcrumbStack([]);
+      setPage(1);
+      setSearchQuery('');
+      setSortBy(undefined);
+      setRefreshKey((k) => k + 1);
+    } catch (err) {
+      console.error('Failed to switch dataset:', err);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleClearDataset = async () => {

@@ -14,8 +14,12 @@ export async function fetchPayloads(): Promise<PayloadInfo[]> {
   return res.payloads;
 }
 
-export async function uploadTuxFile(file: File, _datasetName?: string): Promise<any> {
-  const result = await clientDb.uploadTuxPayload(file, file.name);
+export async function switchPayload(payloadId: string): Promise<any> {
+  return await clientDb.switchPayload(payloadId);
+}
+
+export async function uploadTuxFile(file: File, datasetName?: string): Promise<any> {
+  const result = await clientDb.uploadTuxPayload(file, file.name, datasetName);
   return result;
 }
 
@@ -24,7 +28,7 @@ export async function uploadTuxFileWithProgress(
   datasetName: string | undefined,
   onProgress: (progress: UploadProgressInfo) => void
 ): Promise<any> {
-  const result = await clientDb.uploadTuxPayload(file, file.name, (p) => {
+  const result = await clientDb.uploadTuxPayload(file, file.name, datasetName, (p) => {
     onProgress({
       stage: p.stage,
       stage_name:
