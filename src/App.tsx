@@ -369,26 +369,31 @@ export function App() {
   };
 
   const handleClearDataset = async () => {
-    if (!activePayloadId) return;
+    const toClearId = activePayloadId;
+    if (!toClearId) return;
+
     try {
       setIsLoading(true);
-      await clearDataset(activePayloadId);
+      // Immediately reset React state to clear the active view without waiting
+      setActivePayloadId('');
+      setActiveTable('');
+      setTypesData(null);
+      setTableData(null);
+      setGraphData(null);
+      setSelectedAlias(null);
+      setEntityDetail(null);
+      setBreadcrumbStack([]);
+      localStorage.removeItem('tuxdb_active_payload');
+      localStorage.removeItem('tuxdb_active_table');
+
+      await clearDataset(toClearId);
       const remaining = await fetchPayloads();
       setPayloads(remaining);
+
       if (remaining.length > 0) {
         const nextId = remaining[0].id;
         await handleSelectPayload(nextId);
       } else {
-        setActivePayloadId('');
-        setActiveTable('');
-        setTypesData(null);
-        setTableData(null);
-        setGraphData(null);
-        setSelectedAlias(null);
-        setEntityDetail(null);
-        setBreadcrumbStack([]);
-        localStorage.removeItem('tuxdb_active_payload');
-        localStorage.removeItem('tuxdb_active_table');
         setRefreshKey((k) => k + 1);
       }
     } catch (err) {

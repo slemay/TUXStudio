@@ -219,6 +219,7 @@ async function clearDatabaseFromIndexedDb(payloadId?: string): Promise<void> {
       } else {
         store.clear();
       }
+      store.delete('__active_payload_id__');
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
