@@ -600,8 +600,8 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
 // =====================================================================
 
 function getPayloadTypesSync(dbInstance: Database) {
-  const compTypes: Array<{ type: string; table_name: string; count: number; columns: string[] }> = [];
-  const relTypes: Array<{ type: string; table_name: string; count: number; columns: string[] }> = [];
+  const compTypes: Array<{ name: string; type: string; table_name: string; count: number; columns: string[]; is_relationship: boolean }> = [];
+  const relTypes: Array<{ name: string; type: string; table_name: string; count: number; columns: string[]; is_relationship: boolean }> = [];
 
   const tablesRes = dbInstance.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
   if (tablesRes.length === 0 || !tablesRes[0].values) {
@@ -625,18 +625,22 @@ function getPayloadTypesSync(dbInstance: Database) {
     if (isRel) {
       totalRel += count;
       relTypes.push({
+        name: cleanType,
         type: cleanType,
         table_name: tableName,
         count,
         columns: cols,
+        is_relationship: true,
       });
     } else {
       totalComp += count;
       compTypes.push({
+        name: cleanType,
         type: cleanType,
         table_name: tableName,
         count,
         columns: cols,
+        is_relationship: false,
       });
     }
   }

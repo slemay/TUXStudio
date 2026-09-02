@@ -32,6 +32,7 @@ export interface UploadProgressInfo {
 
 export interface TableTypeInfo {
   name: string;
+  type?: string;
   table_name: string;
   count: number;
   columns: string[];

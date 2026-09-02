@@ -29,10 +29,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<'all' | 'components' | 'relationships'>('all');
 
   const filteredComponents = componentTypes.filter((ct) =>
-    ct.name.toLowerCase().includes(filterText.toLowerCase())
+    (ct.name || ct.type || ct.table_name || '').toLowerCase().includes(filterText.toLowerCase())
   );
   const filteredRelationships = relationshipTypes.filter((rt) =>
-    rt.name.toLowerCase().includes(filterText.toLowerCase())
+    (rt.name || rt.type || rt.table_name || '').toLowerCase().includes(filterText.toLowerCase())
   );
 
   return (
@@ -140,7 +140,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           isActive ? 'bg-indigo-500 dark:bg-indigo-400 shadow-sm shadow-indigo-400' : 'bg-slate-400 dark:bg-slate-600'
                         }`}
                       />
-                      <span className="truncate">{ct.name}</span>
+                      <span className="truncate">{ct.name || ct.type || ct.table_name}</span>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <span
@@ -202,7 +202,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           isActive ? 'bg-emerald-500 dark:bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-slate-400 dark:bg-slate-600'
                         }`}
                       />
-                      <span className="truncate">{rt.name}</span>
+                      <span className="truncate">{rt.name || rt.type || rt.table_name}</span>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <span
