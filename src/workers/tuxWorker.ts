@@ -633,8 +633,38 @@ function getTableDataSync(
   sortBy?: string,
   sortOrder: string = 'ASC'
 ) {
+  if (!tableName) {
+    return {
+      table_name: '',
+      is_relationship: false,
+      page: 1,
+      page_size: pageSize,
+      total_rows: 0,
+      total_pages: 1,
+      columns: [],
+      sort_by: '',
+      sort_order: 'ASC' as const,
+      data: [],
+    };
+  }
+
   const colRes = dbInstance.exec(`PRAGMA table_info("${tableName}");`);
   const cols = colRes.length > 0 && colRes[0].values ? colRes[0].values.map((r) => String(r[1])) : [];
+  if (cols.length === 0) {
+    return {
+      table_name: tableName,
+      is_relationship: false,
+      page: 1,
+      page_size: pageSize,
+      total_rows: 0,
+      total_pages: 1,
+      columns: [],
+      sort_by: '',
+      sort_order: 'ASC' as const,
+      data: [],
+    };
+  }
+
   const isRel = cols.includes('comp1_alias') && cols.includes('comp2_alias');
 
   // Search Filter
