@@ -150,3 +150,7 @@ export async function exportCsvZip(filename: string = 'tuxdb_csv_bundle.zip'): P
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+export async function clearDataset(payloadId?: string): Promise<{ cleared: boolean }> {
+  return callWorker<{ cleared: boolean }>('CLEAR_DATASET', { payloadId });
+}

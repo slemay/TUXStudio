@@ -111,6 +111,6 @@ export async function triggerExportCsvZip(filename?: string): Promise<void> {
   return clientDb.exportCsvZip(filename);
 }
 
-export async function clearDataset(_payloadId?: string): Promise<any> {
-  return { status: 'success' };
+export async function clearDataset(payloadId?: string): Promise<any> {
+  return clientDb.clearDataset(payloadId);
 }

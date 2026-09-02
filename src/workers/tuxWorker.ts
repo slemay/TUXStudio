@@ -76,6 +76,121 @@ function parseXmlAttributes(attrStr: string): Record<string, string> {
 }
 
 // =====================================================================
+// IndexedDB Persistence Layer
+// =====================================================================
+
+const IDB_NAME = 'tuxstudio_persistence';
+const IDB_VERSION = 1;
+const STORE_NAME = 'datasets';
+
+function openIndexedDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(IDB_NAME, IDB_VERSION);
+    request.onupgradeneeded = () => {
+      const idb = request.result;
+      if (!idb.objectStoreNames.contains(STORE_NAME)) {
+        idb.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveDatabaseToIndexedDb(payloadId: string, payloadInfo: any, binaryData: Uint8Array): Promise<void> {
+  try {
+    const idb = await openIndexedDb();
+    return new Promise((resolve, reject) => {
+      const tx = idb.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.put({ payloadInfo, binaryData, updatedAt: Date.now() }, payloadId);
+      store.put(payloadId, '__active_payload_id__');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.warn('Failed to save database to IndexedDB:', err);
+  }
+}
+
+async function loadDatabaseFromIndexedDb(): Promise<{ payloadId: string; payloadInfo: any; binaryData: Uint8Array } | null> {
+  try {
+    const idb = await openIndexedDb();
+    return new Promise((resolve, reject) => {
+      const tx = idb.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const activeReq = store.get('__active_payload_id__');
+      activeReq.onsuccess = () => {
+        const activeId = activeReq.result;
+        if (!activeId) {
+          resolve(null);
+          return;
+        }
+        const dataReq = store.get(activeId);
+        dataReq.onsuccess = () => {
+          if (!dataReq.result) {
+            resolve(null);
+            return;
+          }
+          resolve({
+            payloadId: activeId,
+            payloadInfo: dataReq.result.payloadInfo,
+            binaryData: dataReq.result.binaryData,
+          });
+        };
+        dataReq.onerror = () => reject(dataReq.error);
+      };
+      activeReq.onerror = () => reject(activeReq.error);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function clearDatabaseFromIndexedDb(payloadId?: string): Promise<void> {
+  try {
+    const idb = await openIndexedDb();
+    return new Promise((resolve, reject) => {
+      const tx = idb.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      if (payloadId) {
+        store.delete(payloadId);
+      } else {
+        store.clear();
+      }
+      store.delete('__active_payload_id__');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.warn('Failed to clear database from IndexedDB:', err);
+  }
+}
+
+function rebuildTableMetadata(database: Database) {
+  tableColumns.clear();
+  compTableMap.clear();
+  relTableMap.clear();
+
+  const tablesRes = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
+  if (tablesRes.length > 0 && tablesRes[0].values) {
+    for (const [tbl] of tablesRes[0].values) {
+      const tableName = String(tbl);
+      const colRes = database.exec(`PRAGMA table_info("${tableName}");`);
+      const cols = colRes.length > 0 && colRes[0].values ? colRes[0].values.map((r) => String(r[1])) : [];
+      tableColumns.set(tableName, new Set(cols));
+      const isRel = cols.includes('comp1_alias') && cols.includes('comp2_alias');
+      const cleanType = tableName.replace(/_/g, ' ');
+      if (isRel) {
+        relTableMap.set(cleanType, tableName);
+      } else {
+        compTableMap.set(cleanType, tableName);
+      }
+    }
+  }
+}
+
+// =====================================================================
 // SQLite WASM Initialization
 // =====================================================================
 
@@ -84,7 +199,21 @@ async function getOrInitDb(): Promise<Database> {
   const SQL = await initSqlJs({
     locateFile: () => sqlWasmUrl,
   });
-  db = new SQL.Database();
+
+  const persisted = await loadDatabaseFromIndexedDb();
+  if (persisted && persisted.binaryData) {
+    try {
+      db = new SQL.Database(persisted.binaryData);
+      currentPayloadInfo = persisted.payloadInfo;
+      rebuildTableMetadata(db);
+    } catch (e) {
+      console.warn('Failed to restore database from IndexedDB binary, initializing fresh:', e);
+      db = new SQL.Database();
+    }
+  } else {
+    db = new SQL.Database();
+  }
+
   db.exec('PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -64000;');
   return db;
 }
@@ -557,6 +686,14 @@ async function ingestTuxFile(file: File | Blob, filename: string) {
     };
 
     const typesData = getPayloadTypesSync(database);
+
+    // Persist to IndexedDB for full cross-session persistence across browser refreshes
+    try {
+      const binary = database.export();
+      await saveDatabaseToIndexedDb(payloadId, currentPayloadInfo, binary);
+    } catch (persistErr) {
+      console.warn('Failed to persist database to IndexedDB:', persistErr);
+    }
 
     self.postMessage({
       type: 'PROGRESS',
@@ -1118,8 +1255,30 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       case 'GET_PAYLOADS': {
+        await getOrInitDb();
         const payloads = currentPayloadInfo ? [currentPayloadInfo] : [];
         self.postMessage({ id, success: true, data: { payloads } });
+        break;
+      }
+
+      case 'CLEAR_DATASET': {
+        const { payloadId } = payload || {};
+        await clearDatabaseFromIndexedDb(payloadId);
+        if (db) {
+          try {
+            const existing = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
+            if (existing.length > 0 && existing[0].values) {
+              for (const row of existing[0].values) {
+                db.exec(`DROP TABLE IF EXISTS "${row[0]}";`);
+              }
+            }
+          } catch (_) {}
+        }
+        currentPayloadInfo = null;
+        tableColumns.clear();
+        compTableMap.clear();
+        relTableMap.clear();
+        self.postMessage({ id, success: true, data: { cleared: true } });
         break;
       }
 
