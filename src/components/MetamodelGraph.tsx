@@ -590,6 +590,10 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
               const loopX2 = sPos.x - BOX_WIDTH / 4;
               const loopY2 = sPos.y - sHeight / 2;
 
+              const relText = edge.uml_name || `${edge.label || 'supervises'} ►`;
+              const relBoxWidth = Math.max(180, Math.ceil(relText.length * 7.5 + 40));
+              const halfRelBoxWidth = relBoxWidth / 2;
+
               return (
                 <g key={`label-${edge.id}`}>
                   {/* Stereotype, Association Name & Count Badge */}
@@ -602,12 +606,12 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                     className="cursor-pointer group/rel pointer-events-auto"
                   >
                     <rect
-                      x="-110"
+                      x={-halfRelBoxWidth}
                       y="-24"
-                      width="220"
+                      width={relBoxWidth}
                       height="48"
                       rx="8"
-                      className="fill-white dark:fill-slate-950 stroke-emerald-500/50 dark:stroke-emerald-500/60 group-hover/rel:stroke-emerald-400 dark:group-hover/rel:stroke-emerald-400 group-hover/rel:fill-slate-50 dark:group-hover/rel:fill-slate-900 shadow-xl transition"
+                      className="fill-white dark:fill-slate-950 stroke-emerald-500 dark:stroke-emerald-400 group-hover/rel:stroke-emerald-300 dark:group-hover/rel:stroke-emerald-300 group-hover/rel:fill-slate-50 dark:group-hover/rel:fill-slate-900 shadow-xl transition"
                       strokeWidth="1.5"
                     />
                     <text
@@ -626,7 +630,7 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                       className="fill-slate-900 dark:fill-white font-bold text-[11px]"
                       fontFamily="sans-serif"
                     >
-                      {edge.uml_name || 'supervises ►'}
+                      {relText}
                     </text>
                     <text
                       x="0"
@@ -697,6 +701,10 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
             const tgtLabelX = tgtBorder.x - ux * 32 + nx * 16;
             const tgtLabelY = tgtBorder.y - uy * 32 + ny * 16;
 
+            const relText = edge.uml_name || `${edge.label} ►`;
+            const relBoxWidth = Math.max(180, Math.ceil(relText.length * 7.5 + 40));
+            const halfRelBoxWidth = relBoxWidth / 2;
+
             return (
               <g key={`label-${edge.id}`}>
                 {/* Association Name, Stereotype & Relationship Count Badge (Center of line) */}
@@ -709,12 +717,12 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                   className="cursor-pointer group/rel pointer-events-auto"
                 >
                   <rect
-                    x="-110"
+                    x={-halfRelBoxWidth}
                     y="-24"
-                    width="220"
+                    width={relBoxWidth}
                     height="48"
                     rx="8"
-                    className="fill-white dark:fill-slate-950 stroke-slate-300 dark:stroke-slate-800 group-hover/rel:stroke-emerald-400 dark:group-hover/rel:stroke-emerald-400 group-hover/rel:fill-slate-50 dark:group-hover/rel:fill-slate-900 shadow-xl transition"
+                    className="fill-white dark:fill-slate-950 stroke-emerald-500 dark:stroke-emerald-400 group-hover/rel:stroke-emerald-300 dark:group-hover/rel:stroke-emerald-300 group-hover/rel:fill-slate-50 dark:group-hover/rel:fill-slate-900 shadow-xl transition"
                     strokeWidth="1.5"
                   />
                   <text
@@ -733,7 +741,7 @@ export const MetamodelGraph: React.FC<MetamodelGraphProps> = ({
                     className="fill-slate-900 dark:fill-white font-bold text-[11px]"
                     fontFamily="sans-serif"
                   >
-                    {edge.uml_name || `${edge.label} ►`}
+                    {relText}
                   </text>
                   <text
                     x="0"
